@@ -904,17 +904,17 @@ def unet(input_size, resize_output, num_filters, num_channels, num_classes,
         x = up_block(x, [], kernel_size=3, filters = num_filters[2], i =0, concat = False, attn_type ="cbam") # channel, channel, self
         x = up_block(x, [], kernel_size=3, filters = num_filters[1], i =2, concat = False, attn_type ="channel")
         x = up_block(x, [], kernel_size=5, filters = num_filters[0], i =3, concat = False, attn_type ="None")
-    conditioned_large_scale_fields_v2 = conditioned_large_scale_fields[:,-5]
-    conditioned_large_scale_fields = TimeFilmLayer(
-        num_channels=num_filters[0],
-        hidden_dim=32,
-        use_sinusoidal=True,
-        max_period=365,
-        name='time_film_test_b_large_scale_temp'
-    )([x, conditioned_large_scale_fields_v2])
+    # conditioned_large_scale_fields_v2 = conditioned_large_scale_fields[:,-5]
+    # conditioned_large_scale_fields = TimeFilmLayer(
+    #     num_channels=num_filters[0],
+    #     hidden_dim=32,
+    #     use_sinusoidal=True,
+    #     max_period=365,
+    #     name='time_film_test'
+    # )([x, conditioned_large_scale_fields_v2])
 
     # Final output convolutions
-    output = conditioned_large_scale_fields
+    output = x#conditioned_large_scale_fields
     output = res_block_initial(output, [64], 5, [1, 1], "output_convbbb12347", attn_type ="channel")
     output = res_block_initial(output, [32], 5, [1, 1], "output_convbbb12347", attn_type="channel")
     output = tf.keras.layers.Conv2D(num_classes, 1, activation=final_activation, padding ='same')(output)
@@ -925,6 +925,8 @@ def unet(input_size, resize_output, num_filters, num_channels, num_classes,
     model = tf.keras.models.Model(input_layers, output, name='unet')
     model.summary()
     return model
+
+
 
 
 
