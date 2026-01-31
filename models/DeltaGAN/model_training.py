@@ -21,10 +21,11 @@ from tensorflow.distribute import MirroredStrategy
 from tensorflow.keras import layers
 import sys
 
-config_file = r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/NZ/configs/Emul_hist_future/v_attention_tasmax.json'#sys.argv[-1]
+config_file = sys.argv[-1]#r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/ALPS/configs/Emul_hist_future/ALPS_hist_future_tasmax_orog.json'#sys.argv[-1]
 with open(config_file, 'r') as f:
     config = json.load(f)
-
+decay = 'Exponential'
+config["decay_type"] = decay
 input_shape = config["input_shape"]
 output_shape = config["output_shape"]
 n_filters = config["n_filters"]
@@ -34,9 +35,10 @@ n_output_channels = config["n_output_channels"]
 orog_predictor = config["orog_fields"]
 output_varname = config['output_varname']
 config["itensity_weight"] = 4.25
-config["batch_size"] = 32
-config["epochs"] = 300
+config["batch_size"] = 16
+config["epochs"] = 250
 config["av_int_weight"] = 1
+config["model_name"] = config["model_name"] + "_Learning_decay"
 if orog_predictor == "orog":
     orog_bool = True
 else:
@@ -68,7 +70,7 @@ if output_varname == "pr":
     config["delta"] = 1
     conversion_factor = 1
     config['conversion_factor'] = conversion_factor
-    y[output_varname] = np.log(y[output_varname]* conversion_factor + 1)
+    y[output_varname] = np.log(y[output_varname]* conversion_factor + config["delta"])
 elif output_varname == "tasmax":
     y[output_varname]=(y[output_varname] - output_means[output_varname])/ output_stds[output_varname]
     # normalize but preserve spatial gradients.
@@ -79,11 +81,19 @@ stacked_X = stacked_X.sel(time=common_times)
 y = y.sel(time=common_times)
 
 try:
-
-    y = y.transpose("time", "lat", "lon")
-    stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
+    try:
+        y = y[[output_varname]].transpose("time", "lat", "lon")
+        stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
+    except:
+        try:
+            # This is mostly an error message for the SA region.
+            y = y[[output_varname]].drop("bnds").transpose("time", "lat", "lon")
+            stacked_X = stacked_X.drop("bnds").transpose("time", "lat", "lon","channel")
+        except:
+            y = y[[output_varname]].drop("bnds").transpose("time", "lat", "lon")
+            stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
 except:
-    y = y.transpose("time", "y", "x")
+    y = y[[output_varname]].transpose("time", "y", "x")
     stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
 # rounding to three decimal places
 with ProgressBar():
@@ -120,7 +130,7 @@ learning_rate_adapted = True
 
 start_time= stacked_X.time.min()  # Last time step
 end_time_init = stacked_X.time.max()  # Last time step
-end_time = end_time_init - pd.Timedelta(days = ((365*2)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
+end_time = end_time_init - pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
 
 total_size = stacked_X.sel(time=slice(start_time, end_time)).time.size
 BATCH_SIZE = int(BATCH_SIZE)
@@ -143,25 +153,36 @@ unet_checkpoint = DiscriminatorCheckpoint(
     filepath=f'{config["output_folder"]}/{config["model_name"]}/unet',
     period=5  # Save every 5 epochs
 )
-n_cycles = 20
+n_cycles = 10
 steps_per_epoch = (eval_times // BATCH_SIZE)
 warmup_epochs = 1
 warmup_steps = warmup_epochs * steps_per_epoch
 total_steps = steps_per_epoch * config["epochs"]
-# Example usage in your optimizer config (without warmup, as in your original code)
-lr_schedule = CosineAnnealingLR(
-    initial_learning_rate=1e-5,
-    decay_steps= total_steps//n_cycles, warmup_target=7e-5,  # Peak learning rate
-    warmup_steps=warmup_steps,
-    alpha=0.06  # Don't decay all the way to 0
-)
 
-lr_schedule_gan = CosineAnnealingLR(
-    initial_learning_rate=1e-5,
-    decay_steps=total_steps//n_cycles, warmup_target=7e-5,  # Peak learning rate
-    warmup_steps=warmup_steps,
-    alpha=0.06  # Don't decay all the way to 0
-)
+if decay =='Cosine':
+    # Example usage in your optimizer config (without warmup, as in your original code)
+    lr_schedule = CosineAnnealingLR(
+        initial_learning_rate=1e-5,
+        decay_steps= total_steps//n_cycles, warmup_target=7e-5,  # Peak learning rate
+        warmup_steps=warmup_steps,
+        alpha=0.1  # Don't decay all the way to 0
+    )
+
+    lr_schedule_gan = CosineAnnealingLR(
+        initial_learning_rate=1e-5,
+        decay_steps=total_steps//n_cycles, warmup_target=7e-5,  # Peak learning rate
+        warmup_steps=warmup_steps,
+        alpha=0.1  # Don't decay all the way to 0
+    )
+else:
+    config["learning_rate_unet"] = 0.00015
+    config["learning_rate_unet"] = 0.00015
+    config["decay_rate"] = 0.995
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        config["learning_rate_unet"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"] **2)
+
+    lr_schedule_gan = tf.keras.optimizers.schedules.ExponentialDecay(
+        config["learning_rate"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"])
 
 generator_optimizer = keras.optimizers.Adam(
     learning_rate=lr_schedule_gan, beta_1=config["beta_1"], beta_2=config["beta_2"])
@@ -183,7 +204,7 @@ data = data.shuffle(16)
 # For calendar-aware date offsets
 # Compute the 2-year validation window (assumes 'time' is a datetime/cftime coordinate)
 end_time = stacked_X.time.max()  # Last time step
-start_time_val = end_time - pd.Timedelta(days = ((365*2)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
+start_time_val = end_time - pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
 
 # Slice the datasets to the validation period
 val_stacked_X = stacked_X.sel(time=slice(start_time_val, end_time))
@@ -231,8 +252,8 @@ wgan = WGAN_Cascaded_IP(discriminator=d_model,
                         intensity_weight=config["itensity_weight"],
                         average_intensity_weight=av_int_weight,
                         varname=output_varname, orog_bool = orog_bool)
-prediction_callback = PredictionCallback(unet_model, generator, wgan, [stacked_X.isel(time=slice(0, 30)), stacked_X.isel(time=slice(0, 30)).time.dt.dayofyear],
-                                         y[output_varname].isel(time=slice(0, 30)),
+prediction_callback = PredictionCallback(unet_model, generator, wgan, [stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)), stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)).time.dt.dayofyear],
+                                         y[output_varname].sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)),
                                          orog=orog.values,
                                          save_dir=f'{config["output_folder"]}/{config["model_name"]}',
                                          output_mean=output_means[output_varname].values,
@@ -249,6 +270,11 @@ wgan.compile(d_optimizer=discriminator_optimizer,
 with open(f'{config["output_folder"]}/{config["model_name"]}/config_info.json', 'w') as f:
     json.dump(config, f)
 
-wgan.fit(data, batch_size=BATCH_SIZE, epochs=config["epochs"], verbose=1, shuffle=True,
+history = wgan.fit(data, batch_size=BATCH_SIZE, epochs=config["epochs"], verbose=1, shuffle=True,
          callbacks=[generator_checkpoint, discriminator_checkpoint, unet_checkpoint, prediction_callback, tensorboard_callback],
          validation_data = val_data)
+
+import pandas as pd
+
+history = pd.DataFrame(history.history)
+history.to_csv(f'{config["output_folder"]}/{config["model_name"]}/training_history.csv')

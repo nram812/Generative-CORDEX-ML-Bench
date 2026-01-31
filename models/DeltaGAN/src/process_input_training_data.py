@@ -5,6 +5,7 @@ import os
 from dask.diagnostics import ProgressBar
 import tensorflow as tf
 import glob
+import datetime
 
 def prepare_training_data(config, X, y, means, stds, match_index=True):
     """
@@ -73,6 +74,104 @@ def prepare_static_fields(config):
     orog = (orog - orog.min()) / (orog.max() - orog.min())
 
     return orog
+
+
+def load_test_file(config, predictor_fields, region, experiment):
+    # Load template dataset and reset values to fill value
+    df_test = xr.open_dataset(config["train_y"])
+    df_test.pr.values[:] = -999
+    df_test.tasmax.values[:] = -999
+
+    # Replace time dimension with predictor time coordinates
+    df_test = df_test.isel(time=0).drop("time")
+    df_test = df_test.expand_dims({"time": predictor_fields.time.size})
+    df_test['time'] = predictor_fields.time
+
+    # Set metadata
+    df_test.attrs = predictor_fields.attrs
+    df_test.attrs['description'] = (
+        f'GAN Emulator for {region} trained on {experiment}. '
+        f'Created by Neelesh Rampal (Neelesh.rampal@niwa.co.nz). '
+        f'Training data: https://zenodo.org/records/17957264. '
+        f'Protocol: https://github.com/WCRP-CORDEX/ml-benchmark/tree/main'
+    )
+    try:
+        df_test.attrs['institution'] = (
+            'Emulator: Earth Sciences New Zealand (ESNZ)\n'
+            f'Training data: {df_test.attrs["institution"]}'
+        )
+    except:
+        df_test.attrs['institution'] = (
+            'Emulator: Earth Sciences New Zealand (ESNZ)\n'
+        )
+    df_test.attrs['creation_date'] = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    df_test['pr'].attrs['FillValue'] = -999
+    df_test['tasmax'].attrs['FillValue'] = -999
+
+    return df_test
+
+
+def preprocess_inference_data(config, predictor_path, region, experiment, match_index = True):
+    """
+    Load and preprocess all training data including predictors, targets, and static fields.
+
+    Computes or loads normalization statistics (means and standard deviations) for both
+    input and output variables. Creates necessary directories and saves statistics if
+    they don't already exist.
+
+    Parameters
+    ----------
+    config : dict
+        Configuration dictionary with the following required keys:
+        - 'train_x': path to predictor training data
+        - 'train_y': path to target training data
+        - 'static_predictors': path to static fields (topography)
+        - 'output_folder': directory for saving outputs
+        - 'model_name': name of the model
+        Optional keys (created if missing):
+        - 'mean': path to predictor means
+        - 'std': path to predictor standard deviations
+        - 'means_output': path to target means
+        - 'stds_output': path to target standard deviations
+    match_index : bool, optional
+        If True, align predictors and targets by time intersection. Default is True
+
+    Returns
+    -------
+    stacked_X : xarray.DataArray
+        Normalized and stacked predictor data
+    y : xarray.Dataset
+        Target data with boundary coordinates removed
+    orog : xarray.DataArray
+        Normalized orography data
+    config : dict
+        Updated configuration dictionary with paths to saved statistics
+    """
+    orog = prepare_static_fields(config)
+    X = xr.open_dataset(predictor_path)
+    y = load_test_file(config, X, region, experiment)
+    means = xr.open_dataset(config["mean"])
+    stds = xr.open_dataset(config["std"])
+    stds_output = xr.open_dataset(config["stds_output"])
+    means_output = xr.open_dataset(config["means_output"])
+
+
+    # Remove boundary coordinate variables if present
+    try:
+        y = y.drop_vars(["lat_bnds", "lon_bnds"])
+    except:
+        pass
+
+    # Prepare the training data
+    stacked_X, y = prepare_training_data(config, X, y, means, stds, match_index=match_index)
+
+    try:
+        stacked_X = stacked_X.transpose("time","lat","lon","channel")
+    except:
+        stacked_X = stacked_X.transpose("time","y","x","channel")
+
+    return stacked_X, y, orog, config, means_output, stds_output
 
 
 def preprocess_input_data(config, match_index=True):

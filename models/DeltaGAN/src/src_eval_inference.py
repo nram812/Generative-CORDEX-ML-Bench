@@ -28,39 +28,19 @@ def create_output(X, y):
     return y
 # changed activation function to hyperbolic tangent
 
-
-def load_model_cascade(model_name, epoch, model_dir, load_unet=True):
-    gan = tf.keras.models.load_model(f'{model_dir}/{model_name}/generator_final.h5',
-                                     custom_objects={"BicubicUpSampling2D": BicubicUpSampling2D,
-                                                     "SymmetricPadding2D": SymmetricPadding2D},
+def load_model_cascade(model_name, epoch =295, model_dir = None):
+    custom_objects = {"BicubicUpSampling2D": BicubicUpSampling2D,
+                                                     "SEBlock":SEBlock, "SelfAttention2D": SelfAttention2D, "CBAMBlock":CBAMBlock, "TimeFilmLayer":TimeFilmLayer, "LeakyReLU": tf.keras.layers.LeakyReLU}
+    gan = tf.keras.models.load_model(f'{model_dir}/{model_name}/generator_epoch_{epoch}.h5',
+                                     custom_objects=custom_objects,
                                      compile=False)
     with open(f'{model_dir}/{model_name}/config_info.json') as f:
         config = json.load(f)
 
-        unet = tf.keras.models.load_model(f'{model_dir}/{model_name}/unet_final.h5',
-                                          custom_objects={"BicubicUpSampling2D": BicubicUpSampling2D,
-                                                          "SymmetricPadding2D": SymmetricPadding2D}, compile=False)
+        unet = tf.keras.models.load_model(f'{model_dir}/{model_name}/unet_epoch_{epoch}.h5',
+                                          custom_objects=custom_objects, compile=False)
 
     return gan, unet, config["ad_loss_factor"]
-
-
-def load_data_historical(model, output_config_name):
-    """
-    Returns the predictor variables for inference, and also ground truth data for visualization
-    """
-
-    with ProgressBar():
-        df = xr.open_dataset(f'{output_config_name["eval_predictor_variables"]}/{model}_histupdated.nc',
-                             chunks={"time": 365 * 10}).load()
-        df = df.resample(time='1D').mean()
-        df['time'] = pd.to_datetime(df.time.dt.strftime("%Y-%m-%d"))
-    # df = df.resample(time ='1D').mean()
-
-    # Load and process CCAM outputs
-    # y_ssp370 = xr.open_dataset(f'{ccam_output_path}{model}_ssp370_precip.nc')
-    y_historical = xr.open_dataset(f'{output_config_name["ground_truth"]}/{model}_historical_precip.nc')
-    y_historical['time'] = pd.to_datetime(y_historical.time.dt.strftime("%Y-%m-%d"))
-    return df, y_historical
 
 
 def load_and_normalize_topography_data(filepath):
@@ -114,13 +94,6 @@ def normalize_and_stack(concat_dataset, means_filepath, stds_filepath, variables
     return stacked_X
 
 
-@tf.function
-def predict_batch(model, latent_vectors, data_batch, orog, he, vegt, model_type):
-    if model_type == 'GAN':
-        return model([latent_vectors[0], data_batch, orog, he, vegt], training=False)
-    else:
-        return model(data_batch, training=False)
-
 
 def expand_conditional_inputs(X, batch_size):
     expanded_image = tf.expand_dims(X, axis=0)  # Shape: (1, 172, 179)
@@ -133,178 +106,62 @@ def expand_conditional_inputs(X, batch_size):
     return expanded_image
 
 
-# Example usage:
 @tf.function
-def predict_batch_residual(model, unet, latent_vectors, data_batch, orog, he, vegt, model_type):
-    if model_type == 'GAN':
-        intermediate = unet([latent_vectors[0], data_batch, orog, he, vegt], training=False)
-        # intermediate = apply_gaussian_blur(intermediate, size=7, sigma=1.5)
-        # max_value = tf.reduce_max(intermediate, axis=(1, 2, 3), keepdims=True)
-        # min_value = tf.reduce_min(intermediate, axis=(1, 2, 3), keepdims=True)
-        init_prediction = intermediate
-        # print(intermediate)
-        # intermediate = tf.cast(tf.math.sqrt(tf.clip_by_value(intermediate, clip_value_min=0, clip_value_max=2500)), 'float32')
-        return model([latent_vectors[0], data_batch, orog, he, vegt, init_prediction],
-                     training=False) + intermediate  # +
-    else:
-        return unet([latent_vectors[0], data_batch, orog, he, vegt], training=False)
+def predict_batch_residual(gan, unet, latent_vectors, data_batch, orog, time_of_year, config):
 
-@tf.function
-def predict_batch_residual_v2(model, unet, latent_vectors, data_batch, orog, he, vegt, model_type):
-    if model_type == 'GAN':
-        intermediate = unet([latent_vectors[0], data_batch, orog, he, vegt], training=False)
-        # intermediate = apply_gaussian_blur(intermediate, size=7, sigma=1.5)
-        # max_value = tf.reduce_max(intermediate, axis=(1, 2, 3), keepdims=True)
-        # min_value = tf.reduce_min(intermediate, axis=(1, 2, 3), keepdims=True)
-        init_prediction = intermediate
-        # print(intermediate)
-        # intermediate = tf.cast(tf.math.sqrt(tf.clip_by_value(intermediate, clip_value_min=0, clip_value_max=2500)), 'float32')
-        return model([latent_vectors[0], data_batch, orog, he, vegt, init_prediction],
-                     training=False)# + intermediate  # +
-    else:
-        return unet([latent_vectors[0], data_batch, orog, he, vegt], training=False)
+    unet_args = [data_batch, orog, time_of_year] if config['orog_fields'] == "orog" else [data_batch, time_of_year]
+    intermediate = unet(unet_args, training=False)
+    gan_args = [latent_vectors[0], latent_vectors[1], intermediate, data_batch, orog, time_of_year] \
+        if config['orog_fields'] == "orog" else [latent_vectors[0], latent_vectors[1], intermediate, data_batch, time_of_year]
+    gan_residual = gan(gan_args,
+                     training=False)  # + intermediate
+    gan_prediction = gan_residual + intermediate
+    return gan_prediction, intermediate
 
-def predict_parallel_resid(model, unet, inputs, output_shape, batch_size, orog_vector, he_vector, vegt_vector,
-                           model_type='GAN', output_add_factor =1):
+
+
+def predict_parallel_resid(model, unet, inputs, output_shape, batch_size, orog_vector, time_of_year, means_output, stds_output, config = None):
     n_iterations = inputs.shape[0] // batch_size
     remainder = inputs.shape[0] - n_iterations * batch_size
-
-    dset = []
-
+    output_shape_gan = output_shape
+    output_shape_unet = output_shape_gan.copy()
+    dset_gan = []
+    dset_unet = []
     with tqdm.tqdm(total=n_iterations, desc="Predicting", unit="batch") as pbar:
         for i in range(n_iterations):
             data_batch = inputs[i * batch_size: (i + 1) * batch_size]
-            random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
-            #random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
-            orog = expand_conditional_inputs(orog_vector, batch_size)
-            he = expand_conditional_inputs(he_vector, batch_size)
-            vegt = expand_conditional_inputs(vegt_vector, batch_size)
-
-            output = predict_batch_residual(model, unet, [random_latent_vectors1], data_batch, orog, he, vegt,
-                                            model_type)
-
-            dset += (np.exp(output.numpy()[:, :, :, 0]) - output_add_factor).tolist()
-            pbar.update(1)  # Update the progress bar
-
-    if remainder != 0:
-        random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
-        #random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
-        orog = expand_conditional_inputs(orog_vector, remainder)
-        he = expand_conditional_inputs(he_vector, remainder)
-        vegt = expand_conditional_inputs(vegt_vector, remainder)
-
-        output = predict_batch_residual(model, unet, [random_latent_vectors1[:remainder]],
-                                        inputs[inputs.shape[0] - remainder:], orog, he, vegt, model_type)
-
-        dset += (np.exp(output.numpy()[:, :, :, 0]) - output_add_factor).tolist()
-    output_shape['pr'].values = dset
-
-    return output_shape
-
-@tf.function
-def predict_batch_residual_v280325(model, unet, latent_vectors, data_batch, orog, he, vegt, model_type):
-    if model_type =='GAN':
-        intermediate =unet([data_batch, orog], training=False)
-        #intermediate = apply_gaussian_blur(intermediate, size=7, sigma=1.5)
-        #max_value = tf.reduce_max(intermediate, axis=(1, 2, 3), keepdims=True)
-        #min_value = tf.reduce_min(intermediate, axis=(1, 2, 3), keepdims=True)
-        init_prediction = intermediate#(intermediate - min_value)/(max_value - min_value)
-        #print(intermediate)
-        #intermediate = tf.cast(tf.math.sqrt(tf.clip_by_value(intermediate, clip_value_min=0, clip_value_max=2500)), 'float32')
-        return  model([latent_vectors[0], latent_vectors[1],  data_batch, orog, init_prediction], training=False) +intermediate#+
-    else:
-        return unet([data_batch, orog], training=False)
-    
-def predict_parallel_resid_v280325(model, unet, inputs, output_shape, batch_size, orog_vector, he_vector, vegt_vector,
-                           model_type='GAN', output_add_factor =1, varname = "pr", output_means = None, output_stds = None):
-    n_iterations = inputs.shape[0] // batch_size
-    remainder = inputs.shape[0] - n_iterations * batch_size
-
-    dset = []
-
-    with tqdm.tqdm(total=n_iterations, desc="Predicting", unit="batch") as pbar:
-        for i in range(n_iterations):
-            data_batch = inputs[i * batch_size: (i + 1) * batch_size]
+            time_of_year_batch = time_of_year[i * batch_size: (i + 1) * batch_size]
             random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
             random_latent_vectors2 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[1].shape[1:]))
-            #random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
             orog = expand_conditional_inputs(orog_vector, batch_size)
-            he = expand_conditional_inputs(he_vector, batch_size)
-            vegt = expand_conditional_inputs(vegt_vector, batch_size)
-
-            output = predict_batch_residual_v280325(model, unet, [random_latent_vectors1, random_latent_vectors2], data_batch, orog, he, vegt,
-                                            model_type)
-            if varname == "pr":
-                dset += (np.exp(output.numpy()[:, :, :, 0]) - output_add_factor).tolist()
-            elif "sfcWind" in varname:
-                default_name = "sfcWind"
-                dset += (output.numpy()[:, :, :, 0] * output_stds[default_name].mean().values +output_means[default_name].mean().values).tolist()
-            else:    
-                dset += (output.numpy()[:, :, :, 0] * output_stds[varname].mean().values +output_means[varname].mean().values).tolist()
+            output_gan, output_unet = predict_batch_residual(model, unet, [random_latent_vectors1, random_latent_vectors2],
+                                                              data_batch, orog, time_of_year_batch, config)
+            dset_gan+=output_gan.numpy()[:, :, :, 0].tolist()
+            dset_unet+=output_unet.numpy()[:, :, :, 0].tolist()
             pbar.update(1)  # Update the progress bar
 
-    if remainder != 0:
-        random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
-        random_latent_vectors2 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[1].shape[1:]))
-        #random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
-        orog = expand_conditional_inputs(orog_vector, remainder)
-        he = expand_conditional_inputs(he_vector, remainder)
-        vegt = expand_conditional_inputs(vegt_vector, remainder)
-
-        output = predict_batch_residual_v280325(model, unet, [random_latent_vectors1[:remainder], random_latent_vectors2[:remainder]],
-                                        inputs[inputs.shape[0] - remainder:], orog, he, vegt, model_type)
-
-        if varname == "pr":
-            dset += (np.exp(output.numpy()[:, :, :, 0]) - output_add_factor).tolist()
-        elif "sfcWind" in varname:
-            default_name = "sfcWind"
-            dset += (output.numpy()[:, :, :, 0] * output_stds[default_name].mean().values +output_means[default_name].mean().values ).tolist()
-        else:    
-            dset += (output.numpy()[:, :, :, 0] * output_stds[varname].mean().values +output_means[varname].mean().values).tolist()
-    output_shape['pr'].values = dset
-
-    return output_shape
-
-def predict_parallel_resid_t(model, unet, inputs, output_shape, batch_size, orog_vector, he_vector, vegt_vector,
-                           model_type='GAN', output_means = None, output_stds = None, config = None):
-    n_iterations = inputs.shape[0] // batch_size
-    remainder = inputs.shape[0] - n_iterations * batch_size
-
-    dset = []
-
-    with tqdm.tqdm(total=n_iterations, desc="Predicting", unit="batch") as pbar:
-        for i in range(n_iterations):
-            data_batch = inputs[i * batch_size: (i + 1) * batch_size]
-            random_latent_vectors1 = tf.random.normal(shape=(1,) + tuple(model.inputs[0].shape[1:]))
-            random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
-            orog = expand_conditional_inputs(orog_vector, batch_size)
-            he = expand_conditional_inputs(he_vector, batch_size)
-            vegt = expand_conditional_inputs(vegt_vector, batch_size)
-
-            output = predict_batch_residual(model, unet, [random_latent_vectors1], data_batch, orog, he, vegt,
-                                            model_type)
-
-            dset += ((output.numpy()[:, :, :, 0]) * (output_stds['tasmax'].values) + output_means[
-                'tasmax'].values).tolist()
-
+        if remainder != 0:
+            random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
+            random_latent_vectors2 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[1].shape[1:]))
+            # random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
+            orog = expand_conditional_inputs(orog_vector, remainder)
+            output_gan, output_unet = predict_batch_residual(model, unet, [random_latent_vectors1[:remainder], random_latent_vectors2[:remainder]],
+                                                             inputs[inputs.shape[0] - remainder:], orog, time_of_year[inputs.shape[0] - remainder:], config)
+            dset_gan+=output_gan.numpy()[:, :, :, 0].tolist()
+            dset_unet+=output_unet.numpy()[:, :, :, 0].tolist()
             pbar.update(1)  # Update the progress bar
 
-    if remainder != 0:
-        random_latent_vectors1 = tf.random.normal(shape=(1,) + tuple(model.inputs[0].shape[1:]))
-        random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
-        orog = expand_conditional_inputs(orog_vector, remainder)
-        he = expand_conditional_inputs(he_vector, remainder)
-        vegt = expand_conditional_inputs(vegt_vector, remainder)
 
-        output = predict_batch_residual(model, unet, [random_latent_vectors1[:remainder]],
-                                        inputs[inputs.shape[0] - remainder:], orog, he, vegt, model_type)
-
-        dset += ((output.numpy()[:, :, :, 0]) * (output_stds['tasmax'].values) +
-                 output_means[
-                     'tasmax'].values).tolist()
-    output_shape['pr'].values = dset
-
-    return output_shape
+    output_shape_gan[config['output_varname']].values = dset_gan
+    output_shape_unet[config['output_varname']].values = dset_unet
+    if config["output_varname"] == "tasmax":
+        output_shape_gan[config['output_varname']] = output_shape_gan[config['output_varname']] * stds_output[config['output_varname']] + means_output[config['output_varname']]
+        output_shape_unet[config['output_varname']] = output_shape_unet[config['output_varname']] * stds_output[
+            config['output_varname']] + means_output[config['output_varname']]
+    else:
+        output_shape_gan[config['output_varname']]  = np.exp( output_shape_gan[config['output_varname']] ) - 1
+        output_shape_unet[config['output_varname']] = np.exp(output_shape_unet[config['output_varname']]) - 1
+    return output_shape_gan, output_shape_unet
 
 
 class ValidationMetric(object):
