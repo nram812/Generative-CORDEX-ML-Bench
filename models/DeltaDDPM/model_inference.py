@@ -1,29 +1,25 @@
+"""
+Inference script for DeltaDDPM and RegressUNet models on CORDEX climate data.
+
+This script processes test data through trained diffusion and U-Net models for multiple
+regions, experiment types, and orography configurations.
+"""
+
 import os
 import sys
 import glob
 import json
-import datetime
 from pathlib import Path
-from functools import partial
 
 import numpy as np
-import pandas as pd
 import xarray as xr
 import tensorflow as tf
-from tensorflow.keras import layers
-from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.optimizers import Adam
-from tensorflow.distribute import MirroredStrategy
-from dask.diagnostics import ProgressBar
-
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import cartopy.crs as ccrs
-
+import tqdm
+import sys
 # Configuration
-repo_dirs = r'//esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/models/DeltaDDPM'
-os.chdir(repo_dirs)
-sys.path.append(repo_dirs)
+REPO_DIR = r'//esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/models/DeltaDDPM'
+os.chdir(REPO_DIR)
+sys.path.append(REPO_DIR)
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -34,34 +30,65 @@ from src.dm import *
 from src.process_input_training_data import *
 from src.src_eval_inference import *
 
+# Configuration
+REGIONS = [sys.argv[-1]] # missing NZ
+EXPERIMENT_TYPES = ["ESD", "hist_future"]
+OROG_TYPES = ["orog", "no_orog"]
+BASE_PATH = "/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep"
 
 
+# Model loading epoch and parameters
+MODEL_EPOCH = 130
+BATCH_SIZE = 64
+NUM_INFERENCE_STEPS = 40  # DDIM sampling steps
+PREDICTIONS_BASE = f"/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/OUTPUT_DM_EPOCH_{MODEL_EPOCH}_n_steps_{NUM_INFERENCE_STEPS}"
 
+if not os.path.exists(PREDICTIONS_BASE):
+    os.makedirs(PREDICTIONS_BASE)
 
-# Load configuration
-config_file = r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/SA/models/DM_model_test_SA_0.011000-0.0001-0.02_pr_SA_orogorog/config_info.json'\
-              #r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/SA/models/GAN_Final_hist_future_Learning_decay_0.01_pr_SA_orogorog/config_info.json'#sys.argv[-1]
+def load_model_dm(model_name, epoch=MODEL_EPOCH, model_dir=None):
+    """
+    Load diffusion model and U-Net.
 
-with open(config_file, 'r') as f:
-    config = json.load(f)
+    Args:
+        model_name: Name of the model
+        epoch: Epoch number to load
+        model_dir: Directory containing the model
 
+    Returns:
+        tuple: (diffusion_model, unet, ad_loss_factor)
+    """
+    custom_objects = {
+        "BicubicUpSampling2D": BicubicUpSampling2D,
+        "SEBlock": SEBlock,
+        "FiLMResidual": FiLMResidual,
+        "SelfAttention2D": SelfAttention2D,
+        "SinusoidalTimeEmbedding": SinusoidalTimeEmbedding,
+        "CBAMBlock": CBAMBlock,
+        "TimeFilmLayer": TimeFilmLayer,
+        "LeakyReLU": tf.keras.layers.LeakyReLU
+    }
 
-def load_model_dm(model_name, epoch =295, model_dir = None):
-    custom_objects = {"BicubicUpSampling2D": BicubicUpSampling2D,
-                                                     "SEBlock":SEBlock, "FiLMResidual":FiLMResidual,"SelfAttention2D": SelfAttention2D,"SinusoidalTimeEmbedding":SinusoidalTimeEmbedding, "CBAMBlock":CBAMBlock, "TimeFilmLayer":TimeFilmLayer, "LeakyReLU": tf.keras.layers.LeakyReLU}
-    gan = tf.keras.models.load_model(f'{model_dir}/{model_name}/ema_generator_epoch_{epoch}.h5',
-                                     custom_objects=custom_objects,
-                                     compile=False)
+    diffusion_model = tf.keras.models.load_model(
+        f'{model_dir}/{model_name}/ema_generator_epoch_{epoch}.h5',
+        custom_objects=custom_objects,
+        compile=False
+    )
+
     with open(f'{model_dir}/{model_name}/config_info.json') as f:
         config = json.load(f)
 
-        unet = tf.keras.models.load_model(f'{model_dir}/{model_name}/unet_epoch_{epoch}.h5',
-                                          custom_objects=custom_objects, compile=False)
+    unet = tf.keras.models.load_model(
+        f'{model_dir}/{model_name}/unet_epoch_{epoch}.h5',
+        custom_objects=custom_objects,
+        compile=False
+    )
 
-    return gan, unet, config["ad_loss_factor"]
-#@tf.function
+    return diffusion_model, unet, config["ad_loss_factor"]
+
+
 def predict_batch_residual_diffusion(diffusion_model, unet, scheduler, data_batch, orog, time_of_year,
-                                     config, num_inference_steps=100, seed=None):
+                                     config, num_inference_steps=NUM_INFERENCE_STEPS, seed=None):
     """
     Predict a batch using diffusion model with DDIM sampling.
 
@@ -77,8 +104,7 @@ def predict_batch_residual_diffusion(diffusion_model, unet, scheduler, data_batc
         seed: Random seed for reproducibility
 
     Returns:
-        gan_prediction: Final diffusion model prediction
-        intermediate: U-Net intermediate prediction
+        tuple: (diffusion_prediction, intermediate)
     """
     batch_size = tf.shape(data_batch)[0]
 
@@ -89,7 +115,7 @@ def predict_batch_residual_diffusion(diffusion_model, unet, scheduler, data_batc
     # Initialize random noise
     if seed is not None:
         tf.random.set_seed(seed)
-    residual_pred = tf.random.normal(shape=(batch_size, 128, 128, 1))  # Adjust shape as needed
+    residual_pred = tf.random.normal(shape=(batch_size, 128, 128, 1))
 
     # DDIM sampling with fewer steps
     timesteps = tf.cast(tf.linspace(scheduler.timesteps - 1, 0, num_inference_steps), tf.int32)
@@ -118,7 +144,7 @@ def predict_batch_residual_diffusion(diffusion_model, unet, scheduler, data_batc
 
         # Estimate x0 deterministically
         x0 = (residual_pred - sqrt_1m_alpha_bar_t * eps_t) / sqrt_alpha_bar_t
-        x0 = tf.clip_by_value(x0, -5.0, 5.0)  # Optional clipping
+        x0 = tf.clip_by_value(x0, -5.0, 5.0)
 
         # DDIM deterministic update (no noise injection)
         residual_pred = sqrt_alpha_bar_next * x0 + sqrt_1m_alpha_bar_next * eps_t
@@ -131,7 +157,7 @@ def predict_batch_residual_diffusion(diffusion_model, unet, scheduler, data_batc
 
 def predict_parallel_resid_diffusion(diffusion_model, unet, scheduler, inputs, output_shape, batch_size,
                                      orog_vector, time_of_year, means_output, stds_output, config=None,
-                                     num_inference_steps=100, seed=None):
+                                     num_inference_steps=NUM_INFERENCE_STEPS, seed=None):
     """
     Parallel prediction using diffusion model.
 
@@ -151,8 +177,7 @@ def predict_parallel_resid_diffusion(diffusion_model, unet, scheduler, inputs, o
         seed: Random seed for reproducibility
 
     Returns:
-        output_shape_diffusion: Diffusion model predictions
-        output_shape_unet: U-Net predictions
+        tuple: (output_shape_diffusion, output_shape_unet)
     """
     n_iterations = inputs.shape[0] // batch_size
     remainder = inputs.shape[0] - n_iterations * batch_size
@@ -218,139 +243,253 @@ def predict_parallel_resid_diffusion(diffusion_model, unet, scheduler, inputs, o
 
     return output_shape_diffusion, output_shape_unet
 
-# Transpose orography to standard format
-domain = config["region"]
-base_path = "/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep"
-test_file_path = f"{base_path}/{domain}/test"
-output_path_predictions_gan = r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/predictions/DeltaGAN'
-output_path_predictions_unet = r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/predictions/RegressUNet'
-# Get test files
-files = glob.glob(f"{test_file_path}/*/predictors/*/*.nc", recursive=True)
-# Determine experiment type
-experiment = "Emul_hist_future" if "future" in config["experiment"] else "ESD_pseudo_reality"
-domain_name = f"{domain}_Domain"
-scheduler = DiffusionSchedule(timesteps=config["dm_timesteps"],
-                              beta_start=config["dm_beta_start"], beta_end=config["dm_beta_end"])
-# Process each file
-for file in files:
-    filename = file.split('/')[-1]
+
+def get_config_file_path(region, experiment_type, variable, orog_flag):
+    """
+    Construct the configuration file path for a given setup.
+    Args:
+        region: Region code (NZ, ALPS, SA)
+        experiment_type: Either 'ESD' or 'Hist_future'
+        variable: Climate variable ('pr' or 'tasmax')
+        orog_flag: Orography flag ('orog' or 'None')
+    Returns:
+        str: Path to configuration file
+    """
+    if experiment_type == "ESD":
+        experiment_str = "ESD_pseudo_reality"
+    else:
+        experiment_str = "Emul_hist_future"
+    return (f'{BASE_PATH}/{region}/models/'
+            f'DM_model_Final_{experiment_type}_1000-0.0001-0.02_{variable}_{region}_orog{orog_flag}/'
+            f'config_info.json')
+
+
+def get_experiment_name(config, orog_flag):
+    """
+    Determine experiment name from config and orography flag.
+
+    Args:
+        config: Configuration dictionary
+        orog_flag: Orography flag ('orog' or 'None')
+
+    Returns:
+        str: Experiment name
+    """
+    if "future" in config["experiment"]:
+        base_name = "Emul_hist_future"
+    else:
+        base_name = "ESD_pseudo_reality"
+
+    return base_name
+
+
+def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
+                 output_path_diffusion_base, output_path_unet_base, test_file_path,
+                 n_members=5, temp_conditioning=None):
+    """
+    Process a single test file through both diffusion and U-Net models.
+
+    Args:
+        file_path: Path to input file
+        config_pr: Configuration for precipitation model
+        config_tasmax: Configuration for temperature model
+        region: Region code
+        orog_flag: Orography flag
+        output_path_diffusion_base: Base output path for diffusion predictions
+        output_path_unet_base: Base output path for U-Net predictions
+        test_file_path: Base path for test files
+        n_members: Number of ensemble members to generate
+        temp_conditioning: Temperature conditioning type
+    """
+    try:
+        temp_conditioning = config_tasmax.get("temp_conditioning", "None")
+    except:
+        temp_conditioning = "None"
+
+    filename = file_path.split('/')[-1]
     output_filename = f'Predictions_pr_tasmax_{filename}'
 
-    output_path_gan = file.replace(test_file_path, f'{output_path_predictions_gan}/{domain_name}/{experiment}') \
-        .replace('predictors/', '') \
-        .replace(filename, output_filename)
-    output_path_unet = file.replace(test_file_path, f'{output_path_predictions_unet}/{domain_name}/{experiment}') \
-        .replace('predictors/', '') \
-        .replace(filename, output_filename)
-    # Two paths, one for the GAN, and one for the U-Net.
+    domain_name = f"{region}_Domain"
+    experiment = get_experiment_name(config_tasmax, orog_flag)
 
+    # Construct output paths
+    output_path_diffusion = file_path.replace(
+        test_file_path,
+        f'{output_path_diffusion_base}/{domain_name}/{experiment}'
+    ).replace('predictors/', '').replace(filename, output_filename)
+
+    output_path_unet = file_path.replace(
+        test_file_path,
+        f'{output_path_unet_base}/{domain_name}/{experiment}'
+    ).replace('predictors/', '').replace(filename, output_filename)
+
+    # Create output directories
+    Path(output_path_diffusion).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path_unet).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path_gan).parent.mkdir(parents=True, exist_ok=True)
-    # Preprocess and predict
-    stacked_X, y, orog, config, means_output, stds_output = preprocess_inference_data(
-        config, file, domain_name, experiment
+
+    # Preprocess data
+    print(f"Processing: {filename}")
+    stacked_X, y, orog, config_tasmax, means_output, stds_output = preprocess_inference_data(
+        config_tasmax, file_path, domain_name, experiment
     )
+
+    # Transpose orography to standard format
     try:
         orog = orog.transpose("y", "x")
     except:
         orog = orog.transpose("lat", "lon")
 
-    gan, unet_model, ad_loss = load_model_cascade(
-        config["model_name"],
-        epoch=50,
-        model_dir=config["output_folder"]
+    # Initialize schedulers
+    scheduler_pr = DiffusionSchedule(
+        timesteps=config_pr["dm_timesteps"],
+        beta_start=config_pr["dm_beta_start"],
+        beta_end=config_pr["dm_beta_end"]
     )
-    dm, unet_model_diff, ad_loss = load_model_dm(
-        config["model_name"],
-        epoch=265,
-        model_dir=config["output_folder"]
+
+    scheduler_tasmax = DiffusionSchedule(
+        timesteps=config_tasmax["dm_timesteps"],
+        beta_start=config_tasmax["dm_beta_start"],
+        beta_end=config_tasmax["dm_beta_end"]
     )
-    n_times =365
-    z1 = []
-    for i in range(1):
-        dm_preds, unet_preds = predict_parallel_resid_diffusion(dm, unet_model_diff, scheduler,stacked_X.isel(time = slice(0, n_times)).values,
-                                   y.isel(time = slice(0, n_times)), 64, orog.values,
-                                   stacked_X.isel(time = slice(0, n_times)).time.dt.dayofyear.values, means_output,
-                               stds_output, config = config, num_inference_steps=25)
-        z1.append(dm)
-#gan_outputs = xr.concat(z1, dim ="member")
-training_distribution = xr.open_dataset(config["train_y"])
 
-fig, ax = plt.subplots(1,3, figsize = (18, 6))
-dm_preds.mean("time").pr.plot(ax = ax[0], vmin =0, vmax =10)
-unet_preds.mean("time").pr.plot(ax = ax[1], vmin =0, vmax =10)
-training.sel(time = unet_preds.time).mean("time").pr.plot(ax = ax[2], vmin =0, vmax =10)
-fig.show()
+    # Load models
+    print("Loading precipitation diffusion model...")
+    dm_pr, unet_model_pr, _ = load_model_dm(
+        config_pr["model_name"],
+        epoch=MODEL_EPOCH,
+        model_dir=config_pr["output_folder"]
+    )
 
-fig, ax = plt.subplots()
-ax.hist(dm_preds.pr.values.ravel(), histtype ='step', color ='r', bins = np.arange(0,800,10))
-ax.hist(training.pr.sel(time = unet_preds.time).values.ravel(), histtype ='step', color ='k', bins = np.arange(0,800,10))
-ax.hist(unet_preds.pr.sel(time = unet_preds.time).values.ravel(), histtype ='step', color ='b', bins = np.arange(0,800,10))
-ax.hist(training_distribution.pr.sel(time = "1961").values.ravel(), histtype ='step', color ='orange', bins = np.arange(0,800,10))
-ax.set_yscale('log')
-fig.show()
+    print("Loading temperature diffusion model...")
+    dm_tasmax, unet_model_tasmax, _ = load_model_dm(
+        config_tasmax["model_name"],
+        epoch=MODEL_EPOCH,
+        model_dir=config_tasmax["output_folder"]
+    )
 
-#gan_outputs.isel(time =0).pr.plot(col ="member", col_wrap =2, vmin =0, cmap ='viridis')
+    # Make predictions for multiple ensemble members
+    diffusion_preds = []
+
+    for member_idx in range(n_members):
+        print(f"Generating ensemble member {member_idx + 1}/{n_members}...")
+
+        # Prepare time of year values
+        if temp_conditioning == "None":
+            time_of_year_values = stacked_X.time.dt.dayofyear.values
+        else:
+            try:
+                time_of_year_values = stacked_X.sel(channel='t_850').mean(["lat", "lon"]).values
+            except:
+                time_of_year_values = stacked_X.sel(channel='t_850').mean(["y", "x"]).values
+
+        # Set seed for reproducibility
+        seed = member_idx * 1000 if n_members > 1 else None
+
+        print("Generating precipitation predictions...")
+        diffusion_preds_pr, unet_preds_pr = predict_parallel_resid_diffusion(
+            dm_pr, unet_model_pr, scheduler_pr, stacked_X.values, y, BATCH_SIZE,
+            orog.values, time_of_year_values, means_output, stds_output,
+            config=config_pr, num_inference_steps=NUM_INFERENCE_STEPS, seed=seed
+        )
+
+        print("Generating temperature predictions...")
+        diffusion_preds_tasmax, unet_preds_tasmax = predict_parallel_resid_diffusion(
+            dm_tasmax, unet_model_tasmax, scheduler_tasmax, stacked_X.values, y, BATCH_SIZE,
+            orog.values, time_of_year_values, means_output, stds_output,
+            config=config_tasmax, num_inference_steps=NUM_INFERENCE_STEPS, seed=seed
+        )
+
+        # Merge predictions
+        merged_preds_diffusion = xr.merge([
+            diffusion_preds_pr[['pr']],
+            diffusion_preds_tasmax[['tasmax']]
+        ])
+
+        diffusion_preds.append(merged_preds_diffusion)
+
+    # Combine ensemble members
+    diffusion_preds = xr.concat(diffusion_preds, dim="member")
+    diffusion_preds['member'] = (('member'), np.arange(n_members))
+
+    # Save U-Net predictions (only need one set)
+    merged_preds_unet = xr.merge([
+        unet_preds_pr[['pr']],
+        unet_preds_tasmax[['tasmax']]
+    ])
+
+    # Save predictions
+    print("Saving predictions...")
+    diffusion_preds.to_netcdf(output_path_diffusion)
+    merged_preds_unet.to_netcdf(output_path_unet)
+
+    print(f"Completed: {output_filename}\n")
 
 
-training = xr.open_dataset(r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/SA/test/mid_century/target/pr_tasmax_NorESM2-MM_2041-2060.nc')
-fig, ax = plt.subplots(1,3, figsize = (18, 6))
-vmax=10
-gan_outputs.pr.mean(["time"]).isel(member =0).plot(cmap ='BrBG', vmin =0, vmax =vmax,ax = ax[0])
-unet.pr.mean("time").plot(cmap ='BrBG', vmin =0, vmax =vmax,ax = ax[1])#i
-training.pr.sel(time = unet.time).mean("time").plot(cmap ='BrBG', vmin =0, vmax =vmax,ax = ax[2])
-fig.show()
-z1 = abs(unet.pr.mean("time") - training.pr.sel(time = unet.time).mean("time"))
-abs(z1).mean()
+def main():
+    """Main execution function."""
+
+    for orog_type in OROG_TYPES:
+        output_path_diffusion_base = f'{PREDICTIONS_BASE}/DeltaDDPM_{orog_type}'
+        output_path_unet_base = f'{PREDICTIONS_BASE}/RegressUNet_DM_{orog_type}'
+
+        for experiment_type in EXPERIMENT_TYPES:
+            for region in REGIONS:
+                print(f"\n{'=' * 80}")
+                print(f"Processing: {region} - {experiment_type} - {orog_type}")
+                print(f"{'=' * 80}\n")
+
+                orog_flag = 'orog' if orog_type == "orog" else 'None'
+
+                # Load configurations
+                config_file_pr = get_config_file_path(
+                    region, experiment_type, 'pr', orog_flag
+                )
+                config_file_tasmax = get_config_file_path(
+                    region, experiment_type, 'tasmax', orog_flag
+                )
+
+                try:
+                    with open(config_file_pr, 'r') as f:
+                        config_pr = json.load(f)
+                    with open(config_file_tasmax, 'r') as f:
+                        config_tasmax = json.load(f)
+                except FileNotFoundError as e:
+                    print(f"Warning: Config file not found - {e}")
+                    print("Skipping this configuration...\n")
+                    pass
+
+                print(f"Model: {config_tasmax['model_name']}")
+
+                # Get test files
+                test_file_path = f"{BASE_PATH}/{region}/test"
+                files = glob.glob(
+                    f"{test_file_path}/*/predictors/*/*.nc",
+                    recursive=True
+                )
+
+                if not files:
+                    print(f"Warning: No test files found in {test_file_path}")
+                    pass
+
+                print(f"Found {len(files)} test file(s)")
+
+                # Process each file
+                for file in files:
+                    try:
+                        process_file(
+                            file, config_pr, config_tasmax, region, orog_flag,
+                            output_path_diffusion_base, output_path_unet_base,
+                            test_file_path
+                        )
+                    except Exception as e:
+                        print(f"Error processing {file}: {e}")
+                        print("Continuing with next file...\n")
+                        pass
+
+    print("\n" + "=" * 80)
+    print("All processing complete!")
+    print("=" * 80)
 
 
-z1 = abs(gan_outputs.isel(member =0).pr.mean("time") - training.pr.sel(time = unet.time).mean("time"))
-abs(z1).mean()
-
-z1 = abs(gan_outputs.mean("member").pr.mean("time") - training.pr.sel(time = unet.time).mean("time"))
-abs(z1).mean()
-
-
-
-
-
-
-if output_varname == "pr":
-    config["delta"] = 1
-    conversion_factor = 1
-    config['conversion_factor'] = conversion_factor
-    y[output_varname] = np.log(y[output_varname]* conversion_factor + 1)
-elif output_varname == "tasmax":
-    y[output_varname]=(y[output_varname] - output_means[output_varname])/ output_stds[output_varname]
-    # normalize but preserve spatial gradients.
-# the above doesn't conserve spatial gradients in temperature, but argubly it makes the problem easier?
-
-common_times = stacked_X.time.to_index().intersection(y.time.to_index())
-stacked_X = stacked_X.sel(time=common_times)
-y = y.sel(time=common_times)
-
-try:
-    try:
-        y = y[[output_varname]].transpose("time", "lat", "lon")
-        stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
-    except:
-        try:
-            # This is mostly an error message for the SA region.
-            y = y[[output_varname]].drop("bnds").transpose("time", "lat", "lon")
-            stacked_X = stacked_X.drop("bnds").transpose("time", "lat", "lon","channel")
-        except:
-            y = y[[output_varname]].drop("bnds").transpose("time", "lat", "lon")
-            stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
-except:
-    y = y[[output_varname]].transpose("time", "y", "x")
-    stacked_X = stacked_X.transpose("time", "lat", "lon","channel")
-# rounding to three decimal places
-with ProgressBar():
-    y = y.load()
-    stacked_X = stacked_X.load()
-
-if output_varname == "pr":
-    final_activation_unet = tf.keras.layers.LeakyReLU(0.01)
-else:
-    final_activation_unet = 'linear'
-
+if __name__ == "__main__":
+    main()

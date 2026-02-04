@@ -265,7 +265,7 @@ def preprocess_input_data(config, match_index=True):
     return stacked_X, y, orog, config
 
 
-def create_dataset(y, X, eval_times):
+def create_dataset(y, X, eval_times,temp_conditioning = False):
     """
     Convert xarray data to TensorFlow dataset format.
 
@@ -286,10 +286,19 @@ def create_dataset(y, X, eval_times):
     output_vars = {
         'pr': tf.convert_to_tensor(y[:eval_times].values, dtype=tf.float32),
     }
-
-    X_tensor = {
-        "X": tf.convert_to_tensor(X.values[:eval_times], dtype=tf.float32),
-        "time_of_year": tf.convert_to_tensor(X.time.dt.dayofyear.values[:eval_times], dtype=tf.float32)
-    }
+    try:
+        mean_temp = X.sel(channel = 't_850').mean(["lat","lon"])
+    except:
+        mean_temp = X.sel(channel='t_850').mean(["y", "x"])
+    if temp_conditioning:
+        X_tensor = {
+            "X": tf.convert_to_tensor(X.values[:eval_times], dtype=tf.float32),
+            "time_of_year": tf.convert_to_tensor(mean_temp.values[:eval_times], dtype=tf.float32)
+        }
+    else:
+        X_tensor = {
+            "X": tf.convert_to_tensor(X.values[:eval_times], dtype=tf.float32),
+            "time_of_year": tf.convert_to_tensor(X.time.dt.dayofyear.values[:eval_times], dtype=tf.float32)
+        }
 
     return tf.data.Dataset.from_tensor_slices((output_vars, X_tensor))

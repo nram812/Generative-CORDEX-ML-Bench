@@ -1,5 +1,5 @@
 """
-Inference script for DeltaDDPM and RegressUNet models on CORDEX climate data.
+Inference script for DeltaDDPM and RegressUNet models on CORDEX climate data - TEST SET.
 
 This script processes test data through trained diffusion and U-Net models for multiple
 regions, experiment types, and orography configurations.
@@ -32,17 +32,19 @@ from src.src_eval_inference import *
 
 # Configuration
 REGIONS = ["NZ", "ALPS", "SA"]
-EXPERIMENT_TYPES = ["ESD", "hist_future"]
+EXPERIMENT_TYPES = ["ESD", "Hist_future"]
 OROG_TYPES = ["orog", "no_orog"]
 BASE_PATH = "/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep"
-PREDICTIONS_BASE = "/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/OUTPUT_DM"
-if not os.path.exists(PREDICTIONS_BASE):
-    os.makedirs(PREDICTIONS_BASE)
+
 
 # Model loading epoch and parameters
-MODEL_EPOCH = 100
+MODEL_EPOCH = 250
 BATCH_SIZE = 64
 NUM_INFERENCE_STEPS = 40  # DDIM sampling steps
+PREDICTIONS_BASE = f"/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/predictions_test_dm_{MODEL_EPOCH}"
+n_years_test = 3
+if not os.path.exists(PREDICTIONS_BASE):
+    os.makedirs(PREDICTIONS_BASE)
 
 
 def load_model_dm(model_name, epoch=MODEL_EPOCH, model_dir=None):
@@ -156,7 +158,7 @@ def predict_batch_residual_diffusion(diffusion_model, unet, scheduler, data_batc
 
 def predict_parallel_resid_diffusion(diffusion_model, unet, scheduler, inputs, output_shape, batch_size,
                                      orog_vector, time_of_year, means_output, stds_output, config=None,
-                                     num_inference_steps=100, seed=None):
+                                     num_inference_steps=NUM_INFERENCE_STEPS, seed=None):
     """
     Parallel prediction using diffusion model.
 
@@ -257,12 +259,12 @@ def get_config_file_path(region, experiment_type, variable, orog_flag):
         str: Path to configuration file
     """
     if experiment_type == "ESD":
-        experiment_str = "ESD_pseudo_reality"
+        experiment_str = "ESD"
     else:
-        experiment_str = "Emul_hist_future"
+        experiment_str = "hist_future"
 
     return (f'{BASE_PATH}/{region}/models/'
-            f'DM_model_Final_{experiment_type}_1000-0.0001-0.02_{variable}_{region}_orog{orog_flag}/'
+            f'DM_model_Final_{experiment_str}_1000-0.0001-0.02_{variable}_{region}_orog{orog_flag}/'
             f'config_info.json')
 
 
@@ -282,12 +284,12 @@ def get_experiment_name(config, orog_flag):
     else:
         base_name = "ESD_pseudo_reality"
 
-    return base_name
+    suffix = "_orog" if orog_flag == 'orog' else "_no_orog"
+    return f"{base_name}{suffix}"
 
 
 def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
-                 output_path_diffusion_base, output_path_unet_base, test_file_path,
-                 n_members=5, temp_conditioning=None):
+                 output_path_diffusion_base, output_path_unet_base, test_file_path, n_members=5):
     """
     Process a single test file through both diffusion and U-Net models.
 
@@ -301,29 +303,16 @@ def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
         output_path_unet_base: Base output path for U-Net predictions
         test_file_path: Base path for test files
         n_members: Number of ensemble members to generate
-        temp_conditioning: Temperature conditioning type
     """
-    try:
-        temp_conditioning = config_tasmax.get("temp_conditioning", "None")
-    except:
-        temp_conditioning = "None"
-
     filename = file_path.split('/')[-1]
-    output_filename = f'Predictions_pr_tasmax_{filename}'
+    output_filename = f'Predictions_pr_tasmax_test_set.nc'
 
     domain_name = f"{region}_Domain"
     experiment = get_experiment_name(config_tasmax, orog_flag)
 
     # Construct output paths
-    output_path_diffusion = file_path.replace(
-        test_file_path,
-        f'{output_path_diffusion_base}/{domain_name}/{experiment}'
-    ).replace('predictors/', '').replace(filename, output_filename)
-
-    output_path_unet = file_path.replace(
-        test_file_path,
-        f'{output_path_unet_base}/{domain_name}/{experiment}'
-    ).replace('predictors/', '').replace(filename, output_filename)
+    output_path_diffusion = f'{output_path_diffusion_base}/{domain_name}/{experiment}/{output_filename}'
+    output_path_unet = f'{output_path_unet_base}/{domain_name}/{experiment}/{output_filename}'
 
     # Create output directories
     Path(output_path_diffusion).parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +323,10 @@ def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
     stacked_X, y, orog, config_tasmax, means_output, stds_output = preprocess_inference_data(
         config_tasmax, file_path, domain_name, experiment
     )
+
+    # Select only the last n_years_test of data (test set)
+    stacked_X = stacked_X.isel(time=slice(-365 * n_years_test, None))
+    y = y.isel(time=slice(-365 * n_years_test, None))
 
     # Transpose orography to standard format
     try:
@@ -375,30 +368,18 @@ def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
     for member_idx in range(n_members):
         print(f"Generating ensemble member {member_idx + 1}/{n_members}...")
 
-        # Prepare time of year values
-        if temp_conditioning == "None":
-            time_of_year_values = stacked_X.time.dt.dayofyear.values
-        else:
-            try:
-                time_of_year_values = stacked_X.sel(channel='t_850').mean(["lat", "lon"])
-            except:
-                time_of_year_values = stacked_X.sel(channel='t_850').mean(["y", "x"])
-
-        # Set seed for reproducibility
-        seed = member_idx * 1000 if n_members > 1 else None
-
         print("Generating precipitation predictions...")
         diffusion_preds_pr, unet_preds_pr = predict_parallel_resid_diffusion(
             dm_pr, unet_model_pr, scheduler_pr, stacked_X.values, y, BATCH_SIZE,
-            orog.values, time_of_year_values, means_output, stds_output,
-            config=config_pr, num_inference_steps=NUM_INFERENCE_STEPS, seed=seed
+            orog.values, stacked_X.time.dt.dayofyear.values, means_output, stds_output,
+            config=config_pr, num_inference_steps=NUM_INFERENCE_STEPS, seed=member_idx * 1000
         )
 
         print("Generating temperature predictions...")
         diffusion_preds_tasmax, unet_preds_tasmax = predict_parallel_resid_diffusion(
             dm_tasmax, unet_model_tasmax, scheduler_tasmax, stacked_X.values, y, BATCH_SIZE,
-            orog.values, time_of_year_values, means_output, stds_output,
-            config=config_tasmax, num_inference_steps=NUM_INFERENCE_STEPS, seed=seed
+            orog.values, stacked_X.time.dt.dayofyear.values, means_output, stds_output,
+            config=config_tasmax, num_inference_steps=NUM_INFERENCE_STEPS, seed=member_idx * 1000
         )
 
         # Merge predictions
@@ -462,32 +443,22 @@ def main():
 
                 print(f"Model: {config_tasmax['model_name']}")
 
-                # Get test files
+                # Get test file from train_x (as in GAN script)
                 test_file_path = f"{BASE_PATH}/{region}/test"
-                files = glob.glob(
-                    f"{test_file_path}/*/predictors/*/*.nc",
-                    recursive=True
-                )
+                file = config_tasmax["train_x"]
 
-                if not files:
-                    print(f"Warning: No test files found in {test_file_path}")
+                print(f"Using file: {file}")
+
+                try:
+                    process_file(
+                        file, config_pr, config_tasmax, region, orog_flag,
+                        output_path_diffusion_base, output_path_unet_base,
+                        test_file_path
+                    )
+                except Exception as e:
+                    print(f"Error processing {file}: {e}")
+                    print("Continuing with next configuration...\n")
                     pass
-
-                print(f"Found {len(files)} test file(s)")
-
-                # Process each file
-                for file in files:
-                    print("running file", file)
-                    try:
-                        process_file(
-                            file, config_pr, config_tasmax, region, orog_flag,
-                            output_path_diffusion_base, output_path_unet_base,
-                            test_file_path
-                        )
-                    except Exception as e:
-                        print(f"Error processing {file}: {e}")
-                        print("Continuing with next file...\n")
-                        pass
 
     print("\n" + "=" * 80)
     print("All processing complete!")

@@ -11,7 +11,7 @@ import sys
 import os
 sys.path.append(os.getcwd())
 from src.layers import res_block_initial, \
-    BicubicUpSampling2D,upsample, conv_block,decoder_noise,down_block,up_block,SymmetricPadding2D
+    BicubicUpSampling2D,upsample, conv_block,decoder_noise,down_block,up_block
 
 
 def get_discriminator_model(high_resolution_fields_size,

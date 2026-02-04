@@ -24,7 +24,7 @@ import datetime
 config_file = sys.argv[-1]#r'//esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/SA/configs/Emul_hist_future/SA_hist_future_pr_orog.json'#sys.argv[-1]
 with open(config_file, 'r') as f:
     config = json.load(f)
-config["model_name"] = "DM_Final"
+config["model_name"] = config["model_name"].replace('GAN', 'DM_model')
 config["dm_timesteps"] = 1000
 config["dm_beta_start"] = 1e-4
 config["dm_beta_end"] =0.02
@@ -38,7 +38,7 @@ n_output_channels = config["n_output_channels"]
 orog_predictor = config["orog_fields"]
 output_varname = config['output_varname']
 config["itensity_weight"] = 4.25
-config["batch_size"] = 16
+config["batch_size"] = 8
 config["epochs"] = 500
 config["av_int_weight"] = 1
 if orog_predictor == "orog":
@@ -237,11 +237,11 @@ if decay =='Cosine':
         alpha=0.1  # Don't decay all the way to 0
     )
 else:
-    config["learning_rate_unet"] = 0.00015
-    config["learning_rate_unet"] = 0.00015
+    config["learning_rate_unet"] = 0.00008
+    config["learning_rate_unet"] = 0.00008
     config["decay_rate"] = 0.995
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        config["learning_rate_unet"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"] **2)
+        config["learning_rate_unet"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"])
 
     lr_schedule_gan = tf.keras.optimizers.schedules.ExponentialDecay(
         config["learning_rate"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"])
@@ -534,144 +534,6 @@ class PredictionCallbackDiffusion(tf.keras.callbacks.Callback):
 
         os.makedirs(save_dir, exist_ok=True)
 
-    def on_epoch_end_old(self, epoch, logs=None):
-        """Runs at the end of each epoch to save a prediction image."""
-        # Generate prediction
-        if epoch % 1 == 0:
-            tf.random.set_seed(16)
-            orog_vector = self.model_object.expand_conditional_inputs(self.orog_tensor, self.batch_size)
-            # average_combined, orog_vector,time_of_year_combined, spatial_means_combined,
-            #                 spatial_stds_combined
-            unet_args = [self.x_input_tensor1[:self.batch_size], orog_vector[:self.batch_size],
-                         self.x_input_tensor2[:self.batch_size]] \
-                if self.orog_bool else [self.x_input_tensor1[:self.batch_size],
-                                        self.x_input_tensor2[:self.batch_size]]
-            # TODO: list:
-            #   FIXME: stop rescaling noise in diffusion model
-            unet_prediction = self.unet(unet_args)
-
-            tf.random.set_seed(16)
-            residual_pred = tf.random.normal(shape=(self.batch_size, 128, 128, 1))  # FIXME: get correct shape
-
-
-            for t in tqdm(
-                    reversed(range(self.scheduler.timesteps)),
-                    total=self.scheduler.timesteps,
-                    desc="Sampling timesteps"
-            ):
-                t_tensor = tf.fill((self.batch_size, 1), t)
-                dm_args = [residual_pred[:self.batch_size], t_tensor[:self.batch_size],
-                           self.x_input_tensor1[:self.batch_size],
-                           orog_vector[:self.batch_size], unet_prediction[:self.batch_size],
-                           self.x_input_tensor2[:self.batch_size]] \
-                    if self.orog_bool else [residual_pred[:self.batch_size], t_tensor[:self.batch_size],
-                                            self.x_input_tensor1[:self.batch_size],
-                                            unet_prediction[:self.batch_size][:self.batch_size],
-                                            self.x_input_tensor2]
-
-                eps_theta = self.ema_diffusion.predict(dm_args, verbose=0)
-
-                beta_t = self.scheduler.beta[t]
-                alpha_t = self.scheduler.alpha[t]
-                alpha_bar_t = self.scheduler.alpha_bar[t]
-
-                residual_pred = 1.0 / tf.sqrt(alpha_t) * (
-                            residual_pred - (beta_t / tf.sqrt(1 - alpha_bar_t)) * eps_theta)
-
-                if t > 0:
-                    eps = tf.random.normal(shape=(self.batch_size, 128, 128, 1))  # FIXME: get correct shape
-                    residual_pred += tf.sqrt(beta_t) * eps
-                    print(residual_pred)
-
-            if self.varname == "pr":
-
-                unet_final = tf.math.exp(unet_prediction) - 1
-                gan_final = tf.math.exp(unet_prediction + residual_pred) - 1
-            else:
-                unet_final = tf.squeeze(unet_prediction) * self.output_std + self.output_mean
-                gan_final = tf.squeeze(unet_prediction + residual_pred) * self.output_std + self.output_mean
-
-            y_copy = self.y_input.copy()
-            y_2 = self.y_input.copy()
-            y_copy.values = tf.squeeze(unet_final)
-            y_2.values = tf.squeeze(gan_final)
-            y_2 = y_2.where(y_2 > 0.5, 0.0)
-            y_copy = y_copy.where(y_2 > 0.5, 0.0)
-            print(y_2.max(), y2)
-            boundaries2 = [0, 5, 12.5, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 100, 125, 150, 200, 250]
-            colors2 = [[0.000, 0.000, 0.000, 0.000], [0.875, 0.875, 0.875, 0.784], \
-                       [0.761, 0.761, 0.761, 1.000], [0.639, 0.886, 0.871, 1.000], [0.388, 0.773, 0.616, 1.000], \
-                       [0.000, 0.392, 0.392, 0.588], [0.000, 0.576, 0.576, 0.667], [0.000, 0.792, 0.792, 0.745], \
-                       [0.000, 0.855, 0.855, 0.863], [0.212, 1.000, 1.000, 1.000], [0.953, 0.855, 0.992, 1.000], \
-                       [0.918, 0.765, 0.992, 1.000], [0.918, 0.612, 1.000, 1.000], [0.878, 0.431, 1.000, 1.000], \
-                       [0.886, 0.349, 1.000, 1.000], [0.651, 0.004, 0.788, 1.000], [0.357, 0.008, 0.431, 1.000], \
-                       [0.180, 0.000, 0.224, 1.000]]
-            # reviated for clarity
-
-            # Create the colormap using ListedColormap
-            cmap = mcolors.ListedColormap(colors2)
-            norm = mcolors.BoundaryNorm(boundaries2, cmap.N)
-
-            for i in range(8):
-                print(i)
-                fig, ax = plt.subplots(1, 3, figsize=(16, 6),
-                                       subplot_kw=dict(projection=ccrs.PlateCarree(central_longitude=171.77)))
-                if self.varname == "pr":
-                    y_copy.isel(time=i).plot.contourf(ax=ax[0], transform=ccrs.PlateCarree(), cmap=cmap, norm=norm)
-                    y_2.isel(time=i).plot.contourf(ax=ax[1], transform=ccrs.PlateCarree(), cmap=cmap, norm=norm)
-                    (np.exp(self.y_input.isel(time=i)) - 1).plot.contourf(ax=ax[2], transform=ccrs.PlateCarree(),
-                                                                          cmap=cmap, norm=norm)
-                else:
-                    true = self.y_input.isel(time=i) * self.output_std + self.output_mean
-                    min_t = true.values.min()
-                    max_t = true.values.max()
-                    levels = np.arange(min_t, max_t, 0.5)
-                    y_copy.isel(time=i).plot(ax=ax[0], transform=ccrs.PlateCarree(), cmap='RdBu_r', levels=levels)
-                    y_2.isel(time=i).plot(ax=ax[1], transform=ccrs.PlateCarree(), cmap='RdBu_r', levels=levels)
-                    true.plot(ax=ax[2], transform=ccrs.PlateCarree(), cmap='RdBu_r', levels=levels)
-                ax[0].coastlines('10m')
-                ax[1].coastlines('10m')
-                ax[2].coastlines('10m')
-                ax[0].set_title('Unet')
-                ax[1].set_title('DM')
-                ax[2].set_title('GT')
-                # Save the figure
-                filename = os.path.join(self.save_dir, f"epoch_{epoch + 1}_{i}.png")
-                plt.savefig(filename, bbox_inches="tight", dpi=200)
-                plt.close()
-
-            print(f"Saved prediction image to {filename}")
-
-
-
-        timesteps = tf.cast(tf.linspace(scheduler.timesteps - 1, 0, num_inference_steps), tf.int32)
-
-        for i in tf.range(num_inference_steps - 1):
-            t = timesteps[i]
-            t_next = timesteps[i + 1]
-
-            t_tensor = tf.fill([batch_size, 1], t)
-
-            # Predict noise (epsilon) using current residual
-            eps_t = model([residual_pred, t_tensor, data_batch, orog, intermediate], training=False)
-
-            # Extract scheduler values
-            alpha_bar_t = tf.gather(scheduler.alpha_bar, t)
-            alpha_bar_next = tf.gather(scheduler.alpha_bar, t_next)
-
-            sqrt_alpha_bar_t = tf.sqrt(alpha_bar_t)
-            sqrt_1m_alpha_bar_t = tf.sqrt(1.0 - alpha_bar_t)
-            sqrt_alpha_bar_next = tf.sqrt(alpha_bar_next)
-            sqrt_1m_alpha_bar_next = tf.sqrt(1.0 - alpha_bar_next)
-
-            # Estimate x0 deterministically
-            x0 = (residual_pred - sqrt_1m_alpha_bar_t * eps_t) / sqrt_alpha_bar_t
-            if final_clip_x0:
-                x0 = tf.clip_by_value(x0, -4.0, 4.0)
-
-            # DDIM deterministic update (no noise injection)
-            residual_pred = sqrt_alpha_bar_next * x0 + sqrt_1m_alpha_bar_next * eps_t
-
     def on_epoch_end(self, epoch, logs=None):
         """Runs at the end of each epoch to save a prediction image."""
         # Generate prediction
@@ -692,7 +554,7 @@ class PredictionCallbackDiffusion(tf.keras.callbacks.Callback):
             residual_pred = tf.random.normal(shape=(self.batch_size, 128, 128, 1))  # FIXME: get correct shape
 
             # DDIM sampling with fewer steps
-            num_inference_steps = 100# Much faster than 1000 steps
+            num_inference_steps = 25# Much faster than 1000 steps
             timesteps = tf.cast(tf.linspace(self.scheduler.timesteps - 1, 0, num_inference_steps), tf.int32)
 
             for i in tqdm(range(num_inference_steps - 1), desc="Sampling timesteps"):
@@ -753,30 +615,29 @@ class PredictionCallbackDiffusion(tf.keras.callbacks.Callback):
             # abbreviated for clarity
 
             # Create the colormap using ListedColormap
-            cmap = mcolors.ListedColormap(colors2)
-            norm = mcolors.BoundaryNorm(boundaries2, cmap.N)
+            cmap = 'viridis'#mcolors.ListedColormap(colors2)
+            #norm = mcolors.BoundaryNorm(boundaries2, cmap.N)
 
             for i in range(8):
                 print(i)
-                fig, ax = plt.subplots(1, 3, figsize=(16, 6),
-                                       subplot_kw=dict(projection=ccrs.PlateCarree(central_longitude=171.77)))
+                fig, ax = plt.subplots(1, 3, figsize=(16, 6))
                 print(y_2, y_2.max())
                 if self.varname == "pr":
-                    y_copy.isel(time=i).plot.contourf(ax=ax[0], transform=ccrs.PlateCarree(), cmap=cmap, norm=norm)
-                    y_2.isel(time=i).plot.contourf(ax=ax[1], transform=ccrs.PlateCarree(), cmap=cmap, norm=norm)
-                    (np.exp(self.y_input.isel(time=i)) - 1).plot.contourf(ax=ax[2], transform=ccrs.PlateCarree(),
-                                                                          cmap=cmap, norm=norm)
+                    y_copy.isel(time=i).plot(ax=ax[0], cmap=cmap, vmax =100)
+                    y_2.isel(time=i).plot(ax=ax[1], cmap=cmap, vmax =100)
+                    (np.exp(self.y_input.isel(time=i)) - 1).plot(ax=ax[2],
+                                                                          cmap=cmap, vmax =100)
                 else:
                     true = self.y_input.isel(time=i) * self.output_std + self.output_mean
                     min_t = true.values.min()
                     max_t = true.values.max()
                     levels = np.arange(min_t, max_t, 0.5)
-                    y_copy.isel(time=i).plot(ax=ax[0], transform=ccrs.PlateCarree(), cmap='RdBu_r', levels=levels)
-                    y_2.isel(time=i).plot(ax=ax[1], transform=ccrs.PlateCarree(), cmap='RdBu_r', levels=levels)
-                    true.plot(ax=ax[2], transform=ccrs.PlateCarree(), cmap='RdBu_r', levels=levels)
-                ax[0].coastlines('10m')
-                ax[1].coastlines('10m')
-                ax[2].coastlines('10m')
+                    y_copy.isel(time=i).plot(ax=ax[0], cmap='RdBu_r', levels=levels)
+                    y_2.isel(time=i).plot(ax=ax[1], cmap='RdBu_r', levels=levels)
+                    true.plot(ax=ax[2], cmap='RdBu_r', levels=levels)
+                # ax[0].coastlines('10m')
+                # ax[1].coastlines('10m')
+                # ax[2].coastlines('10m')
                 ax[0].set_title('Unet')
                 ax[1].set_title('DM')
                 ax[2].set_title('GT')
@@ -795,8 +656,9 @@ diffusion_model = ResidualDiffusion(diffusion=generator,
                                      ema_decay=config["dm_ema_decay"],
                                      use_gan_loss_constraints=config.get("use_gan_loss_constraints", False),
                                     orog_bool = orog_bool)
-prediction_callback = PredictionCallbackDiffusion(unet_model, generator, ema_generator, scheduler, diffusion_model, [stacked_X.isel(time=slice(0, 30)), stacked_X.isel(time=slice(0, 30)).time.dt.dayofyear],
-                                         y[output_varname].isel(time=slice(0, 30)), orog = orog.values,
+prediction_callback = PredictionCallbackDiffusion(unet_model, generator, ema_generator, scheduler, diffusion_model, [stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)),
+                                                                                                                     stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)).time.dt.dayofyear],
+                                         y[output_varname].sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)), orog = orog.values,
                                          save_dir = f'{config["output_folder"]}/{config["model_name"]}',
                                          output_mean =output_means[output_varname].values, output_std = output_stds[output_varname].values, varname = output_varname,
                                                   orog_bool = orog_bool)

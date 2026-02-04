@@ -24,6 +24,8 @@ import sys
 config_file = sys.argv[-1]#r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/ALPS/configs/Emul_hist_future/ALPS_hist_future_tasmax_orog.json'#sys.argv[-1]
 with open(config_file, 'r') as f:
     config = json.load(f)
+temp_conditioning = True
+
 decay = 'Exponential'
 config["decay_type"] = decay
 input_shape = config["input_shape"]
@@ -35,10 +37,15 @@ n_output_channels = config["n_output_channels"]
 orog_predictor = config["orog_fields"]
 output_varname = config['output_varname']
 config["itensity_weight"] = 4.25
+if temp_conditioning:
+    config["temp_conditioning"] = "Temp"
 config["batch_size"] = 16
 config["epochs"] = 250
 config["av_int_weight"] = 1
-config["model_name"] = config["model_name"] + "_Learning_decay"
+if temp_conditioning:
+    config["model_name"] = config["model_name"] + "_Learning_decay" + config["temp_conditioning"] +"Cond"
+else:
+    config["model_name"] = config["model_name"] + "_Learning_decay"
 if orog_predictor == "orog":
     orog_bool = True
 else:
@@ -108,14 +115,14 @@ else:
 
 n_filters = n_filters  # + [512]
 generator = res_gan(input_shape, output_shape, n_filters[:], n_channels, n_output_channels,
-                                          final_activation='linear', orog_predictor = orog_bool)
+                                          final_activation='linear', orog_predictor = orog_bool, temp_conditioning = temp_conditioning)
 if output_varname == "pr":
     unet_model = unet(input_shape, output_shape, n_filters[:], n_channels, n_output_channels,
                                           final_activation=tf.keras.layers.LeakyReLU(0.01),
-                           orog_predictor = orog_bool)
+                           orog_predictor = orog_bool, temp_conditioning = temp_conditioning)
 else:
     unet_model = unet(input_shape, output_shape, n_filters[:], n_channels, n_output_channels,
-                                          final_activation='linear', orog_predictor = orog_bool)
+                                          final_activation='linear', orog_predictor = orog_bool, temp_conditioning = temp_conditioning)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
@@ -193,7 +200,7 @@ unet_optimizer = keras.optimizers.Adam(
     learning_rate=lr_schedule, beta_1=config["beta_1"], beta_2=config["beta_2"])
 
 data = create_dataset(y[output_varname].sel(time=slice(start_time, end_time)),
-                      stacked_X.sel(time=slice(start_time, end_time)), eval_times)
+                      stacked_X.sel(time=slice(start_time, end_time)), eval_times, temp_conditioning = temp_conditioning)
 options = tf.data.Options()
 options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.DATA
 data = data.with_options(options)
@@ -220,7 +227,7 @@ val_BATCH_SIZE = int(BATCH_SIZE)  # Reuse global BATCH_SIZE
 print("Val batch size:", val_BATCH_SIZE)
 
 # Create the validation dataset (first val_eval_times steps of the sliced data)
-val_data = create_dataset(val_y, val_stacked_X, val_eval_times)
+val_data = create_dataset(val_y, val_stacked_X, val_eval_times, temp_conditioning = temp_conditioning)
 
 # Apply distributed sharding options
 options = tf.data.Options()
@@ -252,7 +259,19 @@ wgan = WGAN_Cascaded_IP(discriminator=d_model,
                         intensity_weight=config["itensity_weight"],
                         average_intensity_weight=av_int_weight,
                         varname=output_varname, orog_bool = orog_bool)
-prediction_callback = PredictionCallback(unet_model, generator, wgan, [stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)), stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)).time.dt.dayofyear],
+if temp_conditioning:
+    try:
+        mean_temp = stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)).sel(channel = "t_850").mean(["lat","lon"])
+    except:
+        mean_temp = stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)).sel(
+            channel="t_850").mean(["y", "x"])
+
+    call_backargs = [stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)),mean_temp]
+else:
+    call_backargs = [stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)),
+     stacked_X.sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)).time.dt.dayofyear]
+
+prediction_callback = PredictionCallback(unet_model, generator, wgan, call_backargs,
                                          y[output_varname].sel(time=slice(start_time_val, end_time)).isel(time=slice(0, 30)),
                                          orog=orog.values,
                                          save_dir=f'{config["output_folder"]}/{config["model_name"]}',

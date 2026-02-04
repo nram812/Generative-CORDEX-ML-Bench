@@ -30,7 +30,9 @@ def create_output(X, y):
 
 def load_model_cascade(model_name, epoch =295, model_dir = None):
     custom_objects = {"BicubicUpSampling2D": BicubicUpSampling2D,
-                                                     "SEBlock":SEBlock, "SelfAttention2D": SelfAttention2D, "CBAMBlock":CBAMBlock, "TimeFilmLayer":TimeFilmLayer, "LeakyReLU": tf.keras.layers.LeakyReLU}
+                                                     "SEBlock":SEBlock, "SelfAttention2D": SelfAttention2D,
+                      "CBAMBlock":CBAMBlock, "TimeFilmLayer":TimeFilmLayer,
+                      "LeakyReLU": tf.keras.layers.LeakyReLU}
     gan = tf.keras.models.load_model(f'{model_dir}/{model_name}/generator_epoch_{epoch}.h5',
                                      custom_objects=custom_objects,
                                      compile=False)
@@ -164,106 +166,6 @@ def predict_parallel_resid(model, unet, inputs, output_shape, batch_size, orog_v
     return output_shape_gan, output_shape_unet
 
 
-class ValidationMetric(object):
-    """
-    This is a class that computes a wide variety of different metrics for validating a series
-    """
-
-    def __init__(self, datasets):
-        self.ds = datasets
-
-    def __call__(self, thresh):
-        print("Computing Indices.....annual_rainfall")
-        annual_rainfall = self.seasonal_rainfall(self.ds)
-        print("Computing Indices.....CDD")
-        cdd = self.consecutive_dry_days(self.ds, thresh)
-        print("Computing Indices.....RX3DAY")
-        rx3day = self.rx1day(self.ds, thresh)
-
-        print("Computing R10 Day.....")
-        r10day = self.r10day(self.ds)
-        merged_df = xr.merge([cdd, rx3day, annual_rainfall, r10day])
-        return merged_df
-
-    @staticmethod
-    def consecutive_dry_days(ds, thresh=1):
-        """
-        Compute the number of consecutive dry days in a year for a gridded dataset
-
-        Parameters:
-        ds (xarray.Dataset): Gridded dataset with a time dimension
-        thresh (float): Threshold value for defining a dry day (default: 0.1)
-        time_dim (str): Name of the time dimension in the dataset (default: 'time')
-
-        Returns:
-        xarray.DataArray: Number of consecutive dry days in a year
-        """
-
-        # Create a function to find consecutive True values in a boolean array
-        def find_consecutive_true(arr):
-            if ((arr.max() == 1) & (arr.min() == 0)) | (arr.min() == 1):
-                arr = np.asarray(arr)
-                idx = np.flatnonzero(np.concatenate(([arr[0]],
-                                                     arr[:-1] != arr[1:],
-                                                     [True])))
-
-                z = np.diff(idx)[::2]
-                return np.max(z, axis=0)
-            else:
-                # this condition implies that there are no CDD throughout a year?
-                return 0.0
-
-        test_data = ds.pr
-        try:
-            test_data = test_data.stack(z=['lat', 'lon']).dropna("z")
-        except:
-            test_data = test_data.stack(z=['latitude', 'longitude']).dropna("z")
-        # fillna(-999)
-        bool_arr = (test_data <= thresh).astype('int')
-        bool_arr = bool_arr
-        with ProgressBar():
-            consec_dry_days = xr.apply_ufunc(find_consecutive_true, bool_arr.groupby('time.year'),
-                                             input_core_dims=[["time"]], output_core_dims=[[]],
-                                             output_dtypes=[int], vectorize=True, dask='parallelized').compute()
-        consec_dry_days = consec_dry_days.unstack()
-        try:
-            consec_dry_days = consec_dry_days.reindex(lat=sorted(consec_dry_days.lat.values))
-
-        except:
-            consec_dry_days = consec_dry_days.reindex(longitude=sorted(consec_dry_days.longitude.values))
-
-        output = consec_dry_days
-
-        return output.to_dataset().rename({"pr": "cdd"})
-
-    @staticmethod
-    def rx1day(ds, thresh=1):
-        """
-        Compute the Rx3day index for a gridded dataset
-
-        Parameters:
-        ds (xarray.Dataset): Gridded dataset with a time dimension
-        thresh (float): Threshold value for defining a wet day (default: 0.1)
-        time_dim (str): Name of the time dimension in the dataset (default: 'time')
-
-        Returns:
-        xarray.DataArray: Rx3day index for the dataset
-        """
-        return ds.groupby('time.year').max().rename({"pr": "rx1day"})
-
-    @staticmethod
-    def seasonal_rainfall(ds):
-        output = ds.groupby('time.season').mean()  # .mean("year")
-        output1 = output.sel(season='DJF').drop("season").rename({"pr": "DJF_rainfall"})
-        output2 = output.sel(season='JJA').drop("season").rename({"pr": "JJA_rainfall"})
-        output = xr.merge([output1, output2])
-
-        return output
-
-    @staticmethod
-    def r10day(ds):
-        output = (ds > 10).groupby('time.year').sum()  # .mean("year")
-        return output.rename({"pr": "r10day"})
 
 
 def run_experiments(experiments, epoch_list, model_dir,

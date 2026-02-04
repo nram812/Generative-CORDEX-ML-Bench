@@ -182,7 +182,7 @@ def critic(high_resolution_fields_size,
 
 
 def res_gan(input_size, resize_output, num_filters, num_channels, num_classes,
-                          final_activation = tf.keras.layers.LeakyReLU(1), orog_predictor = True):
+                          final_activation = tf.keras.layers.LeakyReLU(1), orog_predictor = True, temp_conditioning = False):
     """new model has two layers of noise, and does not feed in the unet prediction"""
 
     unet_prediction_layer = tf.keras.layers.Input(shape=[resize_output[0], resize_output[1], 1])
@@ -193,21 +193,38 @@ def res_gan(input_size, resize_output, num_filters, num_channels, num_classes,
 
     # Adding Embedding Layers at the start of the network.
     time_of_year = tf.keras.layers.Input(shape=[1], name='time_input')
-    conditioned_large_scale_fields = TimeFilmLayer(
-        num_channels=num_channels,
-        hidden_dim=128,
-        use_sinusoidal=True,
-        max_period=365,
-        name='time_film_a'
-    )([large_scale_fields, time_of_year])
+    if temp_conditioning:
+        conditioned_large_scale_fields = TimeFilmLayer(
+            num_channels=num_channels,
+            hidden_dim=128,
+            use_sinusoidal=False,
+            max_period=365,
+            name='time_film_a'
+        )([large_scale_fields, time_of_year])
 
-    conditioned_unet_fields = TimeFilmLayer(
-        num_channels=num_channels,
-        hidden_dim=32,
-        use_sinusoidal=True,
-        max_period=365,
-        name='time_film_b'
-    )([unet_prediction_layer, time_of_year])
+        conditioned_unet_fields = TimeFilmLayer(
+            num_channels=1,
+            hidden_dim=32,
+            use_sinusoidal=False,
+            max_period=365,
+            name='time_film_b'
+        )([unet_prediction_layer, time_of_year])
+    else:
+        conditioned_large_scale_fields = TimeFilmLayer(
+            num_channels=num_channels,
+            hidden_dim=128,
+            use_sinusoidal=True,
+            max_period=365,
+            name='time_film_a'
+        )([large_scale_fields, time_of_year])
+
+        conditioned_unet_fields = TimeFilmLayer(
+            num_channels=1,
+            hidden_dim=32,
+            use_sinusoidal=True,
+            max_period=365,
+            name='time_film_b'
+        )([unet_prediction_layer, time_of_year])
 
 
     # High-resolution fields
@@ -240,78 +257,25 @@ def res_gan(input_size, resize_output, num_filters, num_channels, num_classes,
     x = up_block(x, temp1, kernel_size=5, filters = num_filters[0], i =3, concat = True, attn_type ="cbam") # self
 
     # Final output convolutions
+
     output = x
+    if temp_conditioning:
+        output = TimeFilmLayer(
+            num_channels=num_filters[0],
+            hidden_dim=128,
+            use_sinusoidal=False,
+            max_period=365,
+            name='time_film_testcdf'
+        )([output, time_of_year])
+    else:
+        output = TimeFilmLayer(
+            num_channels=num_filters[0],
+            hidden_dim=128,
+            use_sinusoidal=True,
+            max_period=365,
+            name='time_film_testcdf1'
+        )([output, time_of_year])
     output = res_block_initial(output, [32], 5, [1, 1], "output_convbbb12347", attn_type ="channel")
-    output = tf.keras.layers.Conv2D(num_classes, 1, activation=final_activation, padding ='same')(output)
-    if orog_predictor:
-        input_layers = [noise, noise2, unet_prediction_layer] + [large_scale_fields, input_topography_fields, time_of_year]
-    else:
-        input_layers = [noise, noise2, unet_prediction_layer] + [large_scale_fields, time_of_year]
-    model = tf.keras.models.Model(input_layers, output, name='gan')
-    model.summary()
-    return model
-
-def res_gan_attn(input_size, resize_output, num_filters, num_channels, num_classes,
-                          final_activation = tf.keras.layers.LeakyReLU(1), orog_predictor = True):
-    """new model has two layers of noise, and does not feed in the unet prediction"""
-
-    unet_prediction_layer = tf.keras.layers.Input(shape=[resize_output[0], resize_output[1], 1])
-    if orog_predictor:
-        input_topography_fields = tf.keras.layers.Input(shape=[resize_output[0], resize_output[1], 1])
-    large_scale_fields = tf.keras.layers.Input(shape =[input_size[0], input_size[1], num_channels])
-    noise = tf.keras.layers.Input(shape=[input_size[0], input_size[1], num_channels])
-
-    # Adding Embedding Layers at the start of the network.
-    time_of_year = tf.keras.layers.Input(shape=[1], name='time_input')
-    conditioned_large_scale_fields = TimeFilmLayer(
-        num_channels=num_channels,
-        hidden_dim=128,
-        use_sinusoidal=True,
-        max_period=365,
-        name='time_film_a'
-    )([large_scale_fields, time_of_year])
-
-    conditioned_unet_fields = TimeFilmLayer(
-        num_channels=num_channels,
-        hidden_dim=32,
-        use_sinusoidal=True,
-        max_period=365,
-        name='time_film_b'
-    )([unet_prediction_layer, time_of_year])
-
-
-    # High-resolution fields
-    if orog_predictor:
-        concat_image_conditioned = tf.keras.layers.Concatenate(-1)([conditioned_unet_fields,  input_topography_fields])
-    else:
-        concat_image_conditioned = conditioned_unet_fields
-    print(concat_image_conditioned, conditioned_large_scale_fields, unet_prediction_layer)
-    x, temp1 = down_block(concat_image_conditioned, num_filters[2], kernel_size=5, i=4, use_pool=False,
-                          attn_type ="channel") # self
-    x, temp2 = down_block(x, num_filters[1], kernel_size=3, i =1, attn_type ="None") # 32, 32, channel
-    x, temp3 = down_block(x, num_filters[2], kernel_size=3, i =2, attn_type ="None") # 16, 16
-
-    # Low resolution fields
-    inputs_abstract = tf.keras.layers.Concatenate(-1)([conditioned_large_scale_fields, noise])
-    x1 = res_block_initial(inputs_abstract, [num_filters[2]*2], 5, [1, 1], f"test123", attn_type ="cbam") # cbam
-    x1 = res_block_initial(x1, [ num_filters[2]*2], 5, [1, 1], f"test11234", attn_type ="cbam") # cbam#down_block(x1, num_filters[2]*2, kernel_size=3, i=5, use_pool=False, attn_type ="cbam")
-    x1 = res_block_initial(x1, [64], 5, [1, 1], f"test1", attn_type ="channel")
-    x1 = res_block_initial(x1, [128], 5, [1, 1], f"test2", attn_type ="channel")
-
-    # Allow Mixing of the Low and High Resolution fields
-    concat_scales = tf.keras.layers.Concatenate(-1)([x1, x])
-    x = res_block_initial(concat_scales, [256], 3, [1, 1], f"test3", attn_type ="cbam") # cbam
-
-    # decode
-    x = up_block(x, temp3, kernel_size=3, filters = num_filters[2], i =0, concat = True, attn_type ="cbam") # channel
-    noise2 = tf.keras.layers.Input(shape=[x.shape[1], x.shape[2], int(num_channels//2)])
-    x = tf.keras.layers.Concatenate(-1)([noise2, x])
-    x = up_block(x, temp2, kernel_size=3, filters = num_filters[1], i =2, concat = True, attn_type ="cbam")
-    x = up_block(x, temp1, kernel_size=3, filters = num_filters[0], i =3, concat = True, attn_type ="None") # self
-
-    # Final output convolutions
-    output = x
-    output = res_block_initial(output, [32], 5, [1, 1], "output_convbbb12347", attn_type ="None")
     output = tf.keras.layers.Conv2D(num_classes, 1, activation=final_activation, padding ='same')(output)
     if orog_predictor:
         input_layers = [noise, noise2, unet_prediction_layer] + [large_scale_fields, input_topography_fields, time_of_year]
@@ -323,7 +287,7 @@ def res_gan_attn(input_size, resize_output, num_filters, num_channels, num_class
 
 
 def unet(input_size, resize_output, num_filters, num_channels, num_classes,
-                          final_activation = 'linear', orog_predictor = True):
+                          final_activation = 'linear', orog_predictor = True, temp_conditioning=False):
 
     """
 
@@ -345,17 +309,25 @@ def unet(input_size, resize_output, num_filters, num_channels, num_classes,
         name='spatial_input'
     )
     # temperature conditioning on the outputs
-    large_scale_slice = tf.keras.layers.GlobalAveragePooling2D(
-        name="spatial_mean"
-    )(large_scale_fields)
     time_of_year = tf.keras.layers.Input(shape=[1], name='time_input')
-    conditioned_large_scale_fields = TimeFilmLayer(
-        num_channels=num_channels,
-        hidden_dim=128,
-        use_sinusoidal=True,
-        max_period=365,
-        name='time_film_test'
-    )([large_scale_fields, time_of_year])
+    if temp_conditioning:
+        conditioned_large_scale_fields = TimeFilmLayer(
+            num_channels=num_channels,
+            hidden_dim=128,
+            use_sinusoidal=False,
+            max_period=365,
+            name='time_film_testas'
+        )([large_scale_fields, time_of_year])
+
+    else:
+
+        conditioned_large_scale_fields = TimeFilmLayer(
+            num_channels=num_channels,
+            hidden_dim=128,
+            use_sinusoidal=True,
+            max_period=365,
+            name='time_film_testas12'
+        )([large_scale_fields, time_of_year])
 
     # High-resolution inputs
     if orog_predictor:
@@ -398,6 +370,22 @@ def unet(input_size, resize_output, num_filters, num_channels, num_classes,
     output = x#conditioned_large_scale_fields
     output = res_block_initial(output, [64], 5, [1, 1], "output_convbbb12347", attn_type ="channel")
     output = res_block_initial(output, [32], 5, [1, 1], "output_convbbb12347", attn_type="channel")
+    if temp_conditioning:
+        output = TimeFilmLayer(
+            num_channels=32,
+            hidden_dim=128,
+            use_sinusoidal=False,
+            max_period=365,
+            name='time_film_testcdf'
+        )([output, time_of_year])
+    else:
+        output = TimeFilmLayer(
+            num_channels=32,
+            hidden_dim=128,
+            use_sinusoidal=True,
+            max_period=365,
+            name='time_film_testcdf1'
+        )([output, time_of_year])
     output = tf.keras.layers.Conv2D(num_classes, 1, activation=final_activation, padding ='same')(output)
     if orog_predictor:
         input_layers = [large_scale_fields, input_topography_fields, time_of_year]
