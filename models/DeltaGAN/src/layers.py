@@ -115,10 +115,10 @@ class CBAMBlock(tf.keras.layers.Layer):
         self.avg_pool = tf.keras.layers.GlobalAveragePooling2D()
         self.max_pool = tf.keras.layers.GlobalMaxPooling2D()
 
-        self.fc1_avg = tf.keras.layers.Dense(channels // self.ratio, activation='relu')
+        self.fc1_avg = tf.keras.layers.Dense(channels // self.ratio, activation='linear')
         self.fc2_avg = tf.keras.layers.Dense(channels)
 
-        self.fc1_max = tf.keras.layers.Dense(channels // self.ratio, activation='relu')
+        self.fc1_max = tf.keras.layers.Dense(channels // self.ratio, activation='linear')
         self.fc2_max = tf.keras.layers.Dense(channels)
 
         self.channel_add = tf.keras.layers.Add()
@@ -166,94 +166,50 @@ class CBAMBlock(tf.keras.layers.Layer):
         config.update({'ratio': self.ratio})
         return config
 
-# def se_block(x, ratio=16, name='se'):
-#     """Squeeze-and-Excitation block"""
-#     channels = x.shape[-1]
-#
-#     # Squeeze: global spatial information
-#     se = tf.keras.layers.GlobalAveragePooling2D(name=name + '_gap')(x)
-#
-#     # Excitation: learn channel interdependencies
-#     se = tf.keras.layers.Dense(channels // ratio, activation='relu',
-#                                name=name + '_fc1')(se)
-#     se = tf.keras.layers.Dense(channels, activation='sigmoid',
-#                                name=name + '_fc2')(se)
-#
-#     # Reshape and scale
-#     se = tf.keras.layers.Reshape((1, 1, channels))(se)
-#     se = tf.keras.layers.Multiply(name=name + '_scale')([x, se])
-#     return se
-#
-#
-# def self_attention_2d(x, name='attn'):
-#     """Self-attention for 2D feature maps"""
-#     channels = x.shape[-1]
-#
-#     # Query, Key, Value projections (reduce channels for efficiency)
-#     query = tf.keras.layers.Conv2D(channels // 8, 1, name=name + '_query')(x)
-#     key = tf.keras.layers.Conv2D(channels // 8, 1, name=name + '_key')(x)
-#     value = tf.keras.layers.Conv2D(channels, 1, name=name + '_value')(x)
-#
-#     # Get spatial dimensions
-#     batch_size = tf.shape(x)[0]
-#     height = tf.shape(x)[1]
-#     width = tf.shape(x)[2]
-#
-#     # Reshape: [B, H, W, C] -> [B, H*W, C]
-#     query = tf.reshape(query, [batch_size, height * width, channels // 8])
-#     key = tf.reshape(key, [batch_size, height * width, channels // 8])
-#     value = tf.reshape(value, [batch_size, height * width, channels])
-#
-#     # Attention scores: [B, H*W, H*W]
-#     attention = tf.matmul(query, key, transpose_b=True)
-#     attention = tf.nn.softmax(attention / tf.sqrt(tf.cast(channels // 8, tf.float32)))
-#
-#     # Apply attention to values: [B, H*W, C]
-#     out = tf.matmul(attention, value)
-#
-#     # Reshape back: [B, H*W, C] -> [B, H, W, C]
-#     out = tf.reshape(out, [batch_size, height, width, channels])
-#
-#     # Project back to original channels
-#     out = tf.keras.layers.Conv2D(channels, 1, name=name + '_proj')(out)
-#
-#     # Residual connection (learnable scale, starts at 0)
-#     gamma = tf.Variable(0., trainable=True, name=name + '_gamma')
-#
-#     return x + gamma * out
-#
-#
-# def cbam_block(x, ratio=8, name='cbam'):
-#     """CBAM: channel + spatial attention"""
-#     channels = x.shape[-1]
-#
-#     # Channel attention
-#     avg_pool = tf.keras.layers.GlobalAveragePooling2D()(x)
-#     max_pool = tf.keras.layers.GlobalMaxPooling2D()(x)
-#
-#     avg_pool = tf.keras.layers.Dense(channels // ratio, activation='relu')(avg_pool)
-#     avg_pool = tf.keras.layers.Dense(channels)(avg_pool)
-#
-#     max_pool = tf.keras.layers.Dense(channels // ratio, activation='relu')(max_pool)
-#     max_pool = tf.keras.layers.Dense(channels)(max_pool)
-#
-#     channel_attention = tf.keras.layers.Add()([avg_pool, max_pool])
-#     channel_attention = tf.keras.layers.Activation('sigmoid')(channel_attention)
-#     channel_attention = tf.keras.layers.Reshape((1, 1, channels))(channel_attention)
-#
-#     x = tf.keras.layers.Multiply()([x, channel_attention])
-#
-#     # Spatial attention
-#     avg_pool = tf.reduce_mean(x, axis=-1, keepdims=True)
-#     max_pool = tf.reduce_max(x, axis=-1, keepdims=True)
-#     concat = tf.keras.layers.Concatenate(axis=-1)([avg_pool, max_pool])
-#
-#     spatial_attention = tf.keras.layers.Conv2D(1, kernel_size=7,
-#                                                padding='same',
-#                                                activation='sigmoid',
-#                                                name=name + '_spatial')(concat)
-#
-#     return tf.keras.layers.Multiply(name=name + '_out')([x, spatial_attention])
+
+def res_block_initial_pr(x, num_filters, kernel_size, strides, name, attn_type= "self"):
+    """Residual Unet block layer for first layer
+    In the residual unet the first residual block does not contain an
+    initial batch normalization and activation so we create this separate
+    block for it.
+    Args:
+        x: tensor, image or image activation
+        num_filters: list, contains the number of filters for each subblock
+        kernel_size: int, size of the convolutional kernel
+        strides: list, contains the stride for each subblock convolution
+        name: name of the layer
+    Returns:
+        x1: tensor, output from residual connection of x and x1
+    """
+
+    if len(num_filters) == 1:
+        num_filters = [num_filters[0], num_filters[0]]
+        x1 = tf.keras.layers.Conv2D(filters=num_filters[0],
+                                    kernel_size=kernel_size,
+                                    strides=strides[0],
+                                    padding='same', kernel_initializer ='he_normal')(x)
+
+    x1 = tf.keras.layers.LeakyReLU(0.05)(x1)
+
+    x1 = tf.keras.layers.Conv2D(filters=num_filters[1],
+                                kernel_size=kernel_size,
+                                strides=strides[1],
+                                padding='same', kernel_initializer ='he_normal')(x1)
+
+    x = tf.keras.layers.Conv2D(filters=num_filters[-1],
+                               kernel_size=1,
+                               strides=1,
+                               padding='same', kernel_initializer ='he_normal')(x)
+    x1 = tf.keras.layers.Add()([x, x1])
+    if attn_type == "channel":
+        x1 = SEBlock(ratio =8)(x1)#cbam_block(x1, name=name + 'spatial_channel_attn')se_block(x1, name=name + '_channel_attn')
+    if attn_type == "cbam":
+        x1 = CBAMBlock(ratio =8)(x1)#cbam_block(x1, name=name + 'spatial_channel_attn')
+    if attn_type == "self":
+        x1 = SelfAttention2D()(x1)#(x1, name=name + 'self_attn')
+    x1 = tf.keras.layers.LeakyReLU(0.05)(x1)
+    return x1
+
 
 class TimeFilmLayer(tf.keras.layers.Layer):
     """Feature-wise Linear Modulation (FiLM) conditioned on time of year
@@ -285,12 +241,12 @@ class TimeFilmLayer(tf.keras.layers.Layer):
         # Time embedding network
         self.time_dense1 = tf.keras.layers.Dense(
             self.hidden_dim,
-            activation='relu',
+            activation='linear',
             name='time_dense1'
         )
         self.time_dense2 = tf.keras.layers.Dense(
             self.hidden_dim,
-            activation='relu',
+            activation='linear',
             name='time_dense2'
         )
 
@@ -356,7 +312,6 @@ class TimeFilmLayer(tf.keras.layers.Layer):
         return config
 
 
-
 def res_block_initial(x, num_filters, kernel_size, strides, name, attn_type= "self"):
     """Residual Unet block layer for first layer
     In the residual unet the first residual block does not contain an
@@ -379,7 +334,7 @@ def res_block_initial(x, num_filters, kernel_size, strides, name, attn_type= "se
                                     strides=strides[0],
                                     padding='same', kernel_initializer ='he_normal')(x)
 
-    x1 = tf.keras.layers.LeakyReLU(0.01)(x1)
+        x1 = tf.keras.layers.LeakyReLU(0.3)(x1)
 
     x1 = tf.keras.layers.Conv2D(filters=num_filters[1],
                                 kernel_size=kernel_size,
@@ -397,7 +352,8 @@ def res_block_initial(x, num_filters, kernel_size, strides, name, attn_type= "se
         x1 = CBAMBlock(ratio =8)(x1)#cbam_block(x1, name=name + 'spatial_channel_attn')
     if attn_type == "self":
         x1 = SelfAttention2D()(x1)#(x1, name=name + 'self_attn')
-    x1 = tf.keras.layers.LeakyReLU(0.01)(x1)
+    x1 = tf.keras.layers.Dropout(0.1)(x1)
+    #x1 = tf.keras.layers.LeakyReLU(0.01)(x1)
     return x1
 
 
@@ -442,8 +398,8 @@ def conv_block(x, filters, activation, kernel_size=(7, 7), strides=(2, 2), paddi
 
     x = layers.Conv2D(filters, kernel_size, strides=strides,
                       padding='same', use_bias=use_bias, kernel_initializer ='he_normal')(x)
-    x = tf.keras.layers.LeakyReLU(0.01)(x)
-
+    x = tf.keras.layers.LeakyReLU(0.3)(x)
+    x = tf.keras.layers.Dropout(rate=0.3)(x)
     return x
 
 
@@ -481,5 +437,3 @@ def up_block(x, y, filters, kernel_size, i =1, method ='unet', concat = True, at
     x = res_block_initial(x, [filters], kernel_size, strides=[1, 1],
                           name='encoder_layer_v2' + str(i),attn_type = attn_type)
     return x
-
-
