@@ -21,7 +21,8 @@ from tensorflow.distribute import MirroredStrategy
 from tensorflow.keras import layers
 import sys
 
-config_file = r'//esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/NZ/configs/Emul_hist_future/NZ_hist_future_pr_orog.json'#sys.argv[-1]#r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/ALPS/configs/Emul_hist_future/ALPS_hist_future_tasmax_orog.json'#sys.argv[-1]
+config_file = sys.argv[-1]
+#r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/SA/configs/Emul_hist_future/SA_hist_future_pr_orog.json'#sys.argv[-1]#r'//esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/NZ/configs/Emul_hist_future/NZ_hist_future_tasmax_orog.json'#sys.argv[-1]#r'/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/ALPS/configs/Emul_hist_future/ALPS_hist_future_tasmax_orog.json'#sys.argv[-1]
 with open(config_file, 'r') as f:
     config = json.load(f)
 temp_conditioning = False
@@ -40,10 +41,10 @@ config["itensity_weight"] = 4.25
 if temp_conditioning:
     config["temp_conditioning"] = "Temp"
 config["batch_size"] = 16
-config["epochs"] = 250
+config["epochs"] = 200
 config["av_int_weight"] = 1
 
-config["model_name"] = config["model_name"] + "_Learning_decay_LittleReluconfig"
+config["model_name"] = config["model_name"] + "elu_lrdecay_lo_localnorm_v3"
 if orog_predictor == "orog":
     orog_bool = True
 else:
@@ -112,14 +113,16 @@ else:
 
 n_filters = n_filters  # + [512]
 generator = res_gan(input_shape, output_shape, n_filters[:], n_channels, n_output_channels,
-                                          final_activation='linear', orog_predictor = orog_bool, temp_conditioning = temp_conditioning)
+                                          final_activation='linear', orog_predictor = orog_bool,
+                    temp_conditioning = temp_conditioning, varname = output_varname)
 if output_varname == "pr":
     unet_model = unet(input_shape, output_shape, n_filters[:], n_channels, n_output_channels,
                                           final_activation=tf.keras.layers.LeakyReLU(0.01),
-                           orog_predictor = orog_bool, temp_conditioning = temp_conditioning)
+                           orog_predictor = orog_bool, temp_conditioning = temp_conditioning, varname = output_varname)
 else:
     unet_model = unet(input_shape, output_shape, n_filters[:], n_channels, n_output_channels,
-                                          final_activation='linear', orog_predictor = orog_bool, temp_conditioning = temp_conditioning)
+                                          final_activation='linear', orog_predictor = orog_bool, temp_conditioning = temp_conditioning,
+                      varname = output_varname)
 
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
@@ -135,7 +138,7 @@ learning_rate_adapted = True
 start_time_init= stacked_X.time.min()  # Last time step
 end_time = stacked_X.time.max()  # Last time step
 start_time = start_time_init + pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
-#end_time = end_time_init - pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
+
 
 total_size = stacked_X.sel(time=slice(start_time, end_time)).time.size
 BATCH_SIZE = int(BATCH_SIZE)
@@ -164,11 +167,11 @@ warmup_epochs = 1
 warmup_steps = warmup_epochs * steps_per_epoch
 total_steps = steps_per_epoch * config["epochs"]
 
-config["learning_rate_unet"] = 0.00008
-config["learning_rate_unet"] = 0.00008
+config["learning_rate_unet"] = 0.00005
+config["learning_rate_unet"] = 0.00005
 config["decay_rate"] = 0.995
 lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    config["learning_rate_unet"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"])
+    config["learning_rate_unet"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"]**2)
 
 lr_schedule_gan = tf.keras.optimizers.schedules.ExponentialDecay(
     config["learning_rate"], decay_steps=config["decay_steps"], decay_rate=config["decay_rate_gan"])
@@ -192,8 +195,8 @@ data = data.shuffle(16)
 
 # For calendar-aware date offsets
 # Compute the 2-year validation window (assumes 'time' is a datetime/cftime coordinate)
-end_time_val = start_time_init + pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )# start_time_initstartstacked_X.time.max()  # Last time step
-start_time_val = start_time_init#end_time - pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )# Start of last 2 years
+end_time_val = start_time_init + pd.Timedelta(days = ((365*3)//BATCH_SIZE) *BATCH_SIZE-1 )
+start_time_val = start_time_init
 
 # Slice the datasets to the validation period
 val_stacked_X = stacked_X.sel(time=slice(start_time_val, end_time_val))

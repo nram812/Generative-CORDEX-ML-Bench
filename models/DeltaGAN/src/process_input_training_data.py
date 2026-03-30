@@ -286,17 +286,17 @@ def create_dataset(y, X, eval_times,temp_conditioning = False):
     output_vars = {
         'pr': tf.convert_to_tensor(y[:eval_times].values, dtype=tf.float32),
     }
-    try:
-        mean_temp = X.sel(channel = 't_850').mean(["lat","lon"])
-    except:
-        mean_temp = X.sel(channel='t_850').mean(["y", "x"])
-    if temp_conditioning:
-        X_tensor = {
-            "X": tf.convert_to_tensor(X.values[:eval_times], dtype=tf.float32),
-            "time_of_year": tf.convert_to_tensor(mean_temp.values[:eval_times], dtype=tf.float32)
-        }
-    else:
-        X_tensor = {
+    # try:
+    #     mean_temp = X.sel(channel = 't_850').mean(["lat","lon"])
+    # except:
+    #     mean_temp = X.sel(channel='t_850').mean(["y", "x"])
+    # if temp_conditioning:
+    #     X_tensor = {
+    #         "X": tf.convert_to_tensor(X.values[:eval_times], dtype=tf.float32),
+    #         "time_of_year": tf.convert_to_tensor(mean_temp.values[:eval_times], dtype=tf.float32)
+    #     }
+    # else:
+    X_tensor = {
             "X": tf.convert_to_tensor(X.values[:eval_times], dtype=tf.float32),
             "time_of_year": tf.convert_to_tensor(X.time.dt.dayofyear.values[:eval_times], dtype=tf.float32)
         }

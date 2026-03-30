@@ -361,10 +361,16 @@ class WGAN_Cascaded_IP(keras.Model):
             adv_loss = self.ad_loss_factor * self.g_loss_fn(gen_logits)
 
             # --- Total Generator Loss ---
-            g_loss = (adv_loss +
-                      TOTALLOSS_gan +
-                      self.average_itensity_weight * avg_intensity_loss +
-                      self.intensity_weight * max_intensity_loss)
+            if self.varname == "pr":
+                g_loss = (adv_loss +
+                          TOTALLOSS_gan +
+                          self.average_itensity_weight * avg_intensity_loss +
+                          self.intensity_weight * max_intensity_loss)
+            else:
+                g_loss = (adv_loss +
+                          TOTALLOSS_gan +
+                          self.average_itensity_weight * avg_intensity_loss +
+                          self.intensity_weight * max_intensity_loss)
 
         gen_gradient = tape.gradient(g_loss, self.generator.trainable_variables)
         self.g_optimizer.apply_gradients(zip(gen_gradient, self.generator.trainable_variables))

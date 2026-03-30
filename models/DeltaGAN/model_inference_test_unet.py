@@ -27,23 +27,29 @@ from src.models import *
 from src.gan import *
 from src.process_input_training_data import *
 from src.src_eval_inference import *
+version = "test"
+if version == "test":
+    REGIONS = ["NZ"]  #
+    EXPERIMENT_TYPES = ["Emul_hist_future"]
+    MODEL_EPOCH = 95
+else:
+    REGIONS = ["NZ", "ALPS", "SA"]
+    EXPERIMENT_TYPES = ["ESD", "Hist_future"]
+    MODEL_EPOCH = 115
 
-
-REGIONS = ["NZ", "ALPS", "SA"]
-EXPERIMENT_TYPES = ["ESD", "Hist_future"]
-MODEL_EPOCH = 195
-version = "Final"
 
 
 BATCH_SIZE = 128
-OROG_TYPES = ["no_orog", "orog"]#, "no_orog"]
+OROG_TYPES = ["orog"]#["no_orog", "orog"]#, "no_orog"]
 BASE_PATH = "/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep"
 PREDICTIONS_BASE = f"/esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/OUTPUT/FullDataset/GAN_{MODEL_EPOCH}_V4"
 if not os.path.exists(PREDICTIONS_BASE):
     os.makedirs(PREDICTIONS_BASE)
+custom_override = r'//esi/project/niwa00018/rampaln/PUBLICATIONS/2026/CORDEX_ML_TF/DATA_prep/NZ/models/GAN_Final_hist_future_Learning_decay_LittleReluconfig_0.01_tasmax_NZ_orogorog/config_info.json'
+# Model loading epoch and parameters
 
 
-def get_config_file_path(region, experiment_type, variable, orog_flag):
+def get_config_file_path(region, experiment_type, variable, orog_flag, custom_config_override = custom_override):
     """
     Construct the configuration file path for a given setup.
 
@@ -60,14 +66,12 @@ def get_config_file_path(region, experiment_type, variable, orog_flag):
         experiment_str = "ESD"
     else:
         experiment_str = "hist_future"
-
-    # return (f'{BASE_PATH}/{region}/models/'
-    #     f'GAN_{version}_{experiment_str}_Learning_decay_0.01_{variable}_{region}_orog{orog_flag}/'
-    #     f'config_info.json')
-    return (f'{BASE_PATH}/{region}/models/'
-        f'GAN_{version}_{experiment_str}elu_lrdecay_lo_localnorm_v3_0.01_{variable}_{region}_orog{orog_flag}/'
-        f'config_info.json')
-
+    if custom_config_override is not None:
+        return custom_config_override
+    else:
+        return (f'{BASE_PATH}/{region}/models/'
+            f'GAN_{version}_{experiment_str}_Learning_decay_0.01_{variable}_{region}_orog{orog_flag}/'
+            f'config_info.json')
 
 
 def get_experiment_name(config, orog_flag):
@@ -92,7 +96,7 @@ def get_experiment_name(config, orog_flag):
 
 def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
                  output_path_diffusion_base, output_path_unet_base, test_file_path,
-                 n_members=5, temp_conditioning=None):
+                 n_members=1, temp_conditioning=None):
     """
     Process a single test file through both diffusion and U-Net models.
 
@@ -108,8 +112,10 @@ def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
         n_members: Number of ensemble members to generate
         temp_conditioning: Temperature conditioning type
     """
-
-    temp_conditioning = "None"
+    try:
+        temp_conditioning = config_tasmax.get("temp_conditioning", "None")
+    except:
+        temp_conditioning = "None"
 
     filename = file_path.split('/')[-1]
     output_filename = f'Predictions_pr_tasmax_{filename}'
@@ -137,6 +143,9 @@ def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
     stacked_X, y, orog, config_tasmax, means_output, stds_output = preprocess_inference_data(
         config_tasmax, file_path, domain_name, experiment
     )
+    print(y.time, stacked_X.time)
+    stacked_X = stacked_X.isel(time = slice(-700,None))
+    y = y.isel(time = slice(-700,None))
 
     # Transpose orography to standard format
     try:
@@ -170,45 +179,110 @@ def process_file(file_path, config_pr, config_tasmax, region, orog_flag,
         # Prepare time of year values
         #if temp_conditioning == "None":
         time_of_year_values = stacked_X.time.dt.dayofyear.values
-
-        gan_preds_pr, unet_preds_pr = predict_parallel_resid(
-            gan_pr, unet_model_pr, stacked_X.values, y, BATCH_SIZE, orog.values,
-            time_of_year_values, means_output, stds_output,
-            config=config_pr
-        )
+        # else:
+        #     try:
+        #         time_of_year_values = stacked_X.sel(channel='t_850').mean(["lat", "lon"]).values
+        #     except:
+        #         time_of_year_values = stacked_X.sel(channel='t_850').mean(["y", "x"]).values
 
         print("Generating temperature predictions...")
         gan_preds_tasmax, unet_preds_tasmax = predict_parallel_resid(
-            gan_tasmax, unet_model_tasmax, stacked_X.values, y, BATCH_SIZE, orog.values,
+            gan_tasmax, unet_model_tasmax, stacked_X.values, y[['tasmax']], BATCH_SIZE, orog.values,
             time_of_year_values, means_output, stds_output,
-            config=config_tasmax
-        )
+            config=config_tasmax)
 
         # Merge and save predictions
         print("Saving predictions...")
-        merged_preds_gan = xr.merge([
-            gan_preds_pr[['pr']],
-            gan_preds_tasmax[['tasmax']]
-        ])
+        merged_preds_gan = gan_preds_tasmax[['tasmax']]
         #merged_preds_gan = merged_preds_gan.astype('float32')
         if iii ==0:
-            merged_preds_unet = xr.merge([
-                unet_preds_pr[['pr']],
-                unet_preds_tasmax[['tasmax']]
-            ])
+            merged_preds_unet = unet_preds_tasmax[['tasmax']]
+
         gan_preds.append(merged_preds_gan)
+
     gan_preds = xr.concat(gan_preds, dim = "member")
     gan_preds['member'] = (('member'), np.arange(n_members))
     gan_preds = gan_preds.astype('float32')
     merged_preds_unet = merged_preds_unet.astype('float32')
-    encoding = {var: {'zlib': True, 'complevel': 5} for var in gan_preds.data_vars}
     print("Saving predictions...")
-    gan_preds.to_netcdf(output_path_diffusion)
+    #gan_preds.to_netcdf(output_path_diffusion)
 
     encoding_unet = {var: {'zlib': True, 'complevel': 5} for var in merged_preds_unet.data_vars}
-    merged_preds_unet.to_netcdf(output_path_unet)
-    print(f"Completed: {output_filename}\n")
+    #merged_preds_unet.to_netcdf(output_path_unet)
 
+    print(f"Completed: {output_filename}\n")
+    return merged_preds_unet
+
+@tf.function
+def predict_batch_residual(gan, unet, latent_vectors, data_batch, orog, time_of_year, config):
+
+    unet_args = [data_batch, orog, time_of_year] if config['orog_fields'] == "orog" else [data_batch, time_of_year]
+    intermediate = unet(unet_args, training=False)
+    #intermediate = tf.clip_by_value(intermediate, clip_value_min=-6.8, clip_value_max=6)
+
+    # gan_args = [latent_vectors[0], latent_vectors[1], intermediate, data_batch, orog, time_of_year] \
+    #     if config['orog_fields'] == "orog" else [latent_vectors[0], latent_vectors[1], intermediate, data_batch, time_of_year]
+    # gan_residual = gan(gan_args,
+    #                  training=False)  # + intermediate
+    # gan_prediction = gan_residual + intermediate
+
+    return intermediate, intermediate
+
+
+
+def predict_parallel_resid(model, unet, inputs, output_shape, batch_size, orog_vector, time_of_year, means_output, stds_output, config = None):
+    n_iterations = inputs.shape[0] // batch_size
+    remainder = inputs.shape[0] - n_iterations * batch_size
+    output_shape_gan = output_shape
+    output_shape_unet = output_shape_gan.copy()
+    dset_gan = []
+    dset_unet = []
+    with tqdm.tqdm(total=n_iterations, desc="Predicting", unit="batch") as pbar:
+        for i in range(n_iterations):
+            data_batch = inputs[i * batch_size: (i + 1) * batch_size]
+            time_of_year_batch = time_of_year[i * batch_size: (i + 1) * batch_size]
+            random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
+            random_latent_vectors2 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[1].shape[1:]))
+            orog = expand_conditional_inputs(orog_vector, batch_size)
+            output_gan, output_unet = predict_batch_residual(model, unet, [random_latent_vectors1, random_latent_vectors2],
+                                                              data_batch, orog, time_of_year_batch, config)
+            if config["output_varname"] == "pr":
+                dset_gan+=tf.clip_by_value(output_gan, clip_value_min=-6.8, clip_value_max=6.8).numpy()[:, :, :, 0].tolist()
+            else:
+                dset_gan += output_gan.numpy()[:, :, :,  0].tolist()
+
+            dset_unet+=output_unet.numpy()[:, :, :, 0].tolist()
+            pbar.update(1)  # Update the progress bar
+
+        if remainder != 0:
+            random_latent_vectors1 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[0].shape[1:]))
+            random_latent_vectors2 = tf.random.normal(shape=(batch_size,) + tuple(model.inputs[1].shape[1:]))
+            # random_latent_vectors1 = tf.repeat(random_latent_vectors1, repeats=batch_size, axis=0)
+            orog = expand_conditional_inputs(orog_vector, remainder)
+            output_gan, output_unet = predict_batch_residual(model, unet, [random_latent_vectors1[:remainder], random_latent_vectors2[:remainder]],
+                                                             inputs[inputs.shape[0] - remainder:], orog, time_of_year[inputs.shape[0] - remainder:],
+                                                             config)
+
+            if config["output_varname"] == "pr":
+                dset_gan += tf.clip_by_value(output_gan, clip_value_min=-6.8, clip_value_max=6.8).numpy()[:, :, :,
+                            0].tolist()
+                dset_unet += output_unet.numpy()[:, :, :, 0].tolist()
+            else:
+                dset_gan += output_gan.numpy()[:, :, :, 0].tolist()
+                dset_unet += output_unet.numpy()[:, :, :, 0].tolist()
+            pbar.update(1)  # Update the progress bar
+
+
+    output_shape_gan[config['output_varname']].values = dset_gan
+    output_shape_unet[config['output_varname']].values = dset_unet
+    if config["output_varname"] == "tasmax":
+        output_shape_gan[config['output_varname']] = (output_shape_gan[config['output_varname']]-8) * stds_output[config['output_varname']].mean() + means_output[config['output_varname']].mean()
+        output_shape_unet[config['output_varname']] = (output_shape_unet[config['output_varname']]-8) * stds_output[
+            config['output_varname']].mean() + means_output[config['output_varname']].mean()
+    else:
+        output_shape_gan[config['output_varname']]  = np.exp( output_shape_gan[config['output_varname']] ) - 1
+        output_shape_unet[config['output_varname']] = np.exp(output_shape_unet[config['output_varname']]) - 1
+    return output_shape_gan, output_shape_unet
 
 def main():
     """Main execution function."""
@@ -232,6 +306,7 @@ def main():
                 config_file_tasmax = get_config_file_path(
                     region, experiment_type, 'tasmax', orog_flag
                 )
+
 
                 try:
                     with open(config_file_pr, 'r') as f:
@@ -262,7 +337,7 @@ def main():
                 for file in files:
                     print("running file", file)
                     try:
-                        process_file(
+                        test_preds = process_file(
                             file, config_pr, config_tasmax, region, orog_flag,
                             output_path_gan_base, output_path_unet_base,
                             test_file_path
